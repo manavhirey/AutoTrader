@@ -6,7 +6,7 @@ from decimal import Decimal
 from typing import Any
 
 from ..config import RunConfig
-from ..models import AccountSnapshot, ClockInfo
+from ..models import AccountSnapshot, ClockInfo, Direction, OrderResult, Setup
 
 _KNOWN_LEGS = {"ENTRY", "TP", "SL", "FLATTEN"}
 
@@ -31,6 +31,26 @@ def whole_share_qty(qty: int) -> int:
     if qty < 1:
         raise ValueError(f"qty must be >= 1, got {qty}")
     return int(qty)
+
+
+def _to_order_result(order: Any) -> OrderResult:
+    """Map an alpaca-py Order (or fake) to our broker-agnostic OrderResult.
+
+    The SDK's ``status`` is an ``OrderStatus`` str-Enum whose ``str()`` is the member
+    repr (``'OrderStatus.ACCEPTED'``) on 3.11+, so we take ``.value`` to preserve the
+    wire string our orchestrator compares against (spec §16). ``filled_qty`` is typed
+    ``str | float | None`` and may arrive float-shaped (``'10.0'``), so route through
+    ``Decimal`` before ``int`` rather than ``int('10.0')`` (which raises)."""
+    status = getattr(order.status, "value", order.status)
+    fap = getattr(order, "filled_avg_price", None)
+    return OrderResult(
+        order_id=str(order.id),
+        client_order_id=str(order.client_order_id),
+        status=str(status),
+        filled_avg_price=None if fap is None else Decimal(str(fap)),
+        filled_qty=int(Decimal(str(getattr(order, "filled_qty", 0) or 0))),
+        legs=list(getattr(order, "legs", []) or []),
+    )
 
 
 class AlpacaBroker:
@@ -78,3 +98,42 @@ class AlpacaBroker:
     async def get_clock(self) -> ClockInfo:
         clk = await asyncio.to_thread(self._client.get_clock)
         return ClockInfo(is_open=bool(clk.is_open), next_close=clk.next_close)
+
+    @property
+    def current_seq(self) -> int:
+        """Seq of the most recently submitted bracket. The orchestrator's EOD
+        FLATTEN synthesis reuses this so both sides format identical coid prefixes
+        via :func:`client_order_id` (MED #12 / spec §8 step 9)."""
+        return self._seq
+
+    async def submit_bracket(self, setup: Setup, qty: int) -> OrderResult:
+        """Submit a BRACKET market order for ``setup`` at ``qty`` shares.
+
+        Prices come straight from the engine's ``Setup`` (TP above / SL below for
+        LONG, inverted for SHORT — spec §13), so the broker is direction-agnostic
+        on prices and only flips ``side``. Offloaded via ``to_thread`` so the
+        blocking SDK call never stalls the event loop (spec §13/§16)."""
+        from alpaca.trading.enums import OrderClass, OrderSide, TimeInForce
+        from alpaca.trading.requests import (
+            MarketOrderRequest,
+            StopLossRequest,
+            TakeProfitRequest,
+        )
+
+        qty = whole_share_qty(qty)  # defense-in-depth; rejects qty < 1 before any state change
+        self._seq += 1
+        entry_coid = client_order_id(self._session_date, self._run.symbol, self._seq, "ENTRY")
+        self._parent_coid = entry_coid
+        side = OrderSide.BUY if setup.direction is Direction.LONG else OrderSide.SELL
+        req = MarketOrderRequest(
+            symbol=self._run.symbol,
+            qty=qty,
+            side=side,
+            time_in_force=TimeInForce.DAY,
+            order_class=OrderClass.BRACKET,
+            client_order_id=entry_coid,
+            take_profit=TakeProfitRequest(limit_price=float(setup.target)),
+            stop_loss=StopLossRequest(stop_price=float(setup.stop)),
+        )
+        order = await asyncio.to_thread(self._client.submit_order, req)
+        return _to_order_result(order)
