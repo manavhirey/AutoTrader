@@ -189,6 +189,9 @@ write-ups live in the `.superpowers/sdd/progress.md` roll-up. (Beyond this list,
   `get_order_by_client_id` primitive the CRITICAL reconciliation item needs) to decide adopt-vs-cancel. *(Found: T40 security review.)*
 
 ### Resolved-during-build findings log (audit trail; fixed in the named commit)
+- [x] **[T42 flatten] EOD close always flattens.** Review (HIGH): if `cancel_all()` raised, `flatten()` never ran →
+  position held open at EOD. Now `cancel_all` is best-effort (try/except + log) and `flatten` always runs (the critical
+  EOD safety action); a `flatten` failure still propagates. +test (cancel raises → flatten still runs). Fixed in T42 commit.
 - [x] **[T41 fill tracking] P&L core: fixed 2 brief bugs + 3 review-criticals.** The brief's full-fill detection
   (`position_qty==fill.qty`) and build-on-every-exit were wrong; reimplemented as intended-qty tracking + build-only-on-
   `position_qty==0` (share-weighted partial exits). Then review-fixes: SHORT entries (negative `position_qty`) now detected

@@ -466,3 +466,26 @@ class Orchestrator:
                 self._exit_fills = []
                 self._pending_entry_qty = 0
             return
+
+    async def _flatten_eod(self) -> None:
+        session_date = (
+            self.clock.now().date()
+            if self.next_close is None
+            else self.next_close.date()
+        )
+        # Tag the FLATTEN close with a deterministic client_order_id BEFORE
+        # close_all_positions so its fill is attributable (§8 step 9). Reuse the
+        # broker's trade_seq (single source of truth) and the canonical helper
+        # rather than re-deriving the id with an ad-hoc f-string (MED #12).
+        seq = getattr(self.broker, "current_seq", self.trade_seq)
+        self.flatten_coid = execution_alpaca.client_order_id(
+            session_date, self.symbol, seq, "FLATTEN"
+        )
+        self.log.info("flatten_eod", flatten_coid=self.flatten_coid)
+        try:
+            # cancel resting bracket children first (best-effort)
+            await self.broker.cancel_all()
+        except Exception as exc:  # noqa: BLE001
+            self.log.warning("flatten_cancel_failed", error=type(exc).__name__)
+        # ALWAYS flatten — the critical EOD safety action (idempotent)
+        await self.broker.flatten()

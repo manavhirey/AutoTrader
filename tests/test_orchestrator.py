@@ -78,6 +78,7 @@ class FakeBroker:
         equity=Decimal("100000"),
         open_orders=None,
         positions_qty=0,
+        cancel_raises=False,
     ):
         self._clock = ClockInfo(
             is_open=is_open,
@@ -92,6 +93,7 @@ class FakeBroker:
         self.cancel_all_calls = 0
         self.flatten_calls = 0
         self._fills = []
+        self.cancel_raises = cancel_raises
 
     async def get_account(self):
         return AccountSnapshot(
@@ -135,6 +137,8 @@ class FakeBroker:
 
     async def cancel_all(self):
         self.cancel_all_calls += 1
+        if self.cancel_raises:
+            raise RuntimeError("cancel_all failed")
 
     async def flatten(self):
         self.flatten_calls += 1
@@ -924,3 +928,50 @@ async def test_adopted_close_builds_trade_result_without_crash():
     assert len(o.trades) == 1
     tr = o.trades[0]
     assert tr.pnl == Decimal("-10.00")  # long loss: (99-100)*10
+
+
+# ---------------------------------------------------------------------------
+# Task 42: Orchestrator._flatten_eod (cancel_all + flatten + tagged FLATTEN coid)
+# ---------------------------------------------------------------------------
+
+
+async def test_flatten_eod_cancels_then_flattens():
+    broker = FakeBroker()
+    o = _make_orch(broker)
+    o.start_equity = Decimal("100000")
+    await o._flatten_eod()
+    assert broker.cancel_all_calls == 1
+    assert broker.flatten_calls == 1
+
+
+async def test_flatten_eod_tags_flatten_client_order_id_before_flatten():
+    broker = FakeBroker()
+    o = _make_orch(broker)
+    o.start_equity = Decimal("100000")
+    o.trade_seq = 1
+    await o._flatten_eod()
+    assert o.flatten_coid is not None
+    assert o.flatten_coid.endswith("-FLATTEN")
+    assert "AAPL" in o.flatten_coid
+
+
+async def test_flatten_eod_idempotent_second_call_noops_on_already_flat():
+    broker = FakeBroker()
+    o = _make_orch(broker)
+    o.start_equity = Decimal("100000")
+    await o._flatten_eod()
+    await o._flatten_eod()  # second call must be safe
+    # cancel/flatten are idempotent; we only require no exception + flatten ran at least once
+    assert broker.flatten_calls >= 1
+
+
+async def test_flatten_eod_flatten_runs_even_if_cancel_all_raises():
+    # Task 42 (HIGH): flatten must run even if cancel_all fails (network/API error).
+    # If cancel_all raises, _flatten_eod must NOT raise and must still call flatten().
+    broker = FakeBroker(cancel_raises=True)
+    o = _make_orch(broker)
+    o.start_equity = Decimal("100000")
+    # Must not raise despite cancel_all raising
+    await o._flatten_eod()
+    assert broker.cancel_all_calls == 1, "cancel_all must be attempted"
+    assert broker.flatten_calls == 1, "flatten must run despite cancel_all raising"
