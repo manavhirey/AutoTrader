@@ -351,3 +351,239 @@ async def test_logreporter_session_report_no_trade_zero_and_reason():
     assert kw["total_pnl"] == "0.00"
     assert kw["no_trade_reason"] == "no confirmed breakout/entry"
     assert kw["trades"] == []
+
+
+# ---------------------------------------------------------------------------
+# Task 36: DiscordReporter tests
+# ---------------------------------------------------------------------------
+
+import pytest  # noqa: E402
+
+discord = pytest.importorskip("discord")
+from orb_bot.reporting.discord import (  # noqa: E402
+    DiscordReporter,
+    format_session_embed,
+    format_trade_line,
+)
+
+
+def test_format_trade_line_long_target_matches_spec():
+    t = models.TradeResult(
+        direction=Direction.LONG,
+        model=Model.BREAKOUT,
+        qty=10,
+        entry_price=Decimal("100.00"),
+        exit_price=Decimal("102.00"),
+        pnl=Decimal("20.00"),
+        pnl_pct=Decimal("20.00") / Decimal("5000.00"),  # 0.004 -> +0.40%
+        exit_reason="TARGET",
+    )
+    line = format_trade_line(t)
+    assert line == "LONG 10sh @ 100.00 → 102.00  +$20.00 (+0.40%)  [TARGET]"
+
+
+def test_format_trade_line_short_stop_signs():
+    t = models.TradeResult(
+        direction=Direction.SHORT,
+        model=Model.RETEST,
+        qty=5,
+        entry_price=Decimal("50.00"),
+        exit_price=Decimal("51.00"),
+        pnl=Decimal("-5.00"),
+        pnl_pct=Decimal("-5.00") / Decimal("10000.00"),  # -0.0005 -> -0.05%
+        exit_reason="STOP",
+    )
+    line = format_trade_line(t)
+    assert line == "SHORT 5sh @ 50.00 → 51.00  -$5.00 (-0.05%)  [STOP]"
+
+
+class _FakeDiscordClient:
+    def __init__(self, opening_range=None):
+        self.sent = []
+        self.opening_range = opening_range
+
+    async def send_embed(self, embed):
+        self.sent.append(embed)
+
+
+@pytest.mark.asyncio
+async def test_discordreporter_session_report_embed_has_denominator_and_caveat():
+    rng = models.OpeningRange(
+        high=Decimal("101.00"),
+        low=Decimal("99.00"),
+        established_at=_ts(9, 45),
+        width=Decimal("2.00"),
+        feed="IEX",
+        bars_present=9,            # < T=15 -> low confidence
+        low_confidence=True,
+    )
+    client = _FakeDiscordClient(opening_range=rng)
+    r = DiscordReporter(client, timeframe_min=15)
+    s = summary.build_session_summary(
+        trades=[_tr("20.00", reason="TARGET")],
+        start_equity=Decimal("10000.00"),
+        end_equity=Decimal("10020.00"),
+        mode="LIVE",
+        symbol="AAPL",
+        session_date=date(2026, 6, 19),
+        no_trade_reason=None,
+    )
+    await r.session_report(s)
+    assert len(client.sent) == 1
+    embed = client.sent[0]
+    fields = {f.name: f.value for f in embed.fields}
+    assert "bars_present 9/15" in fields["Opening range data"]
+    assert "LOW CONFIDENCE" in fields["Opening range data"]
+    assert fields["Record"] == "W 1 / L 0 / BE 0"
+
+
+@pytest.mark.asyncio
+async def test_discordreporter_trade_taken_sends_embed():
+    client = _FakeDiscordClient()
+    r = DiscordReporter(client, timeframe_min=15)
+    await r.trade_taken(_setup(), qty=10, mode="PAPER")
+    assert len(client.sent) == 1
+    fields = {f.name: f.value for f in client.sent[0].fields}
+    assert fields["Direction"] == "LONG"
+    assert fields["Qty"] == "10"
+    assert fields["Entry"] == "100.00"
+
+
+# ---------------------------------------------------------------------------
+# Fix A: absent opening_range -> low-confidence (0 bars) not full-confidence
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_discordreporter_absent_opening_range_is_low_confidence():
+    """When client.opening_range is absent the embed must show 0/T (LOW CONFIDENCE)."""
+    client = _FakeDiscordClient(opening_range=None)
+    r = DiscordReporter(client, timeframe_min=15)
+    s = summary.build_session_summary(
+        trades=[],
+        start_equity=Decimal("10000.00"),
+        end_equity=Decimal("10000.00"),
+        mode="PAPER",
+        symbol="AAPL",
+        session_date=date(2026, 6, 19),
+        no_trade_reason="window expired",
+    )
+    await r.session_report(s)
+    assert len(client.sent) == 1
+    fields = {f.name: f.value for f in client.sent[0].fields}
+    assert "bars_present 0/15" in fields["Opening range data"]
+    assert "LOW CONFIDENCE" in fields["Opening range data"]
+
+
+# ---------------------------------------------------------------------------
+# Fix B: Trades field overflow guard
+# ---------------------------------------------------------------------------
+
+def test_format_session_embed_many_trades_field_within_1024():
+    """40-trade summary: 'Trades' field must be ≤1024 chars and include '…(N more)'."""
+    trades = [_tr("1.00", reason="TARGET") for _ in range(40)]
+    s = summary.build_session_summary(
+        trades=trades,
+        start_equity=Decimal("10000.00"),
+        end_equity=Decimal("10040.00"),
+        mode="PAPER",
+        symbol="AAPL",
+        session_date=date(2026, 6, 19),
+        no_trade_reason=None,
+    )
+    embed = format_session_embed(s, bars_present=15, timeframe_min=15, low_confidence=False)
+    fields = {f.name: f.value for f in embed.fields}
+    trades_value = fields["Trades"]
+    assert len(trades_value) <= 1024
+    assert "…(" in trades_value and "more)" in trades_value
+
+
+# ---------------------------------------------------------------------------
+# Fix C: send failure must not propagate out of session_report
+# ---------------------------------------------------------------------------
+
+class _FailingDiscordClient:
+    """Fake client whose send_embed always raises."""
+
+    async def send_embed(self, embed):
+        raise RuntimeError("network error")
+
+
+@pytest.mark.asyncio
+async def test_discordreporter_session_report_survives_send_failure():
+    """A failing send_embed must not propagate — session_report returns normally."""
+    client = _FailingDiscordClient()
+    r = DiscordReporter(client, timeframe_min=15)
+    s = summary.build_session_summary(
+        trades=[_tr("20.00", reason="TARGET")],
+        start_equity=Decimal("10000.00"),
+        end_equity=Decimal("10020.00"),
+        mode="PAPER",
+        symbol="AAPL",
+        session_date=date(2026, 6, 19),
+        no_trade_reason=None,
+    )
+    # Must not raise
+    await r.session_report(s)
+
+
+# ---------------------------------------------------------------------------
+# Fix E: additional coverage
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_format_session_embed_zero_pnl_color_and_field():
+    """Zero-P/L session: color is light_grey and Total realized P/L shows +$0.00."""
+    s = summary.build_session_summary(
+        trades=[_tr("0.00", reason="FLATTEN")],
+        start_equity=Decimal("10000.00"),
+        end_equity=Decimal("10000.00"),
+        mode="PAPER",
+        symbol="AAPL",
+        session_date=date(2026, 6, 19),
+        no_trade_reason=None,
+    )
+    embed = format_session_embed(s, bars_present=15, timeframe_min=15)
+    assert embed.color == discord.Color.light_grey()
+    fields = {f.name: f.value for f in embed.fields}
+    assert "+$0.00" in fields["Total realized P/L"]
+
+
+@pytest.mark.asyncio
+async def test_discordreporter_session_report_no_trade_reason_in_field():
+    """session_report with trades=[] and a no_trade_reason shows both in 'Trades' field."""
+    client = _FakeDiscordClient()
+    r = DiscordReporter(client, timeframe_min=15)
+    s = summary.build_session_summary(
+        trades=[],
+        start_equity=Decimal("10000.00"),
+        end_equity=Decimal("10000.00"),
+        mode="PAPER",
+        symbol="AAPL",
+        session_date=date(2026, 6, 19),
+        no_trade_reason="no confirmed breakout",
+    )
+    await r.session_report(s)
+    assert len(client.sent) == 1
+    fields = {f.name: f.value for f in client.sent[0].fields}
+    assert "No trades" in fields["Trades"]
+    assert "no confirmed breakout" in fields["Trades"]
+
+
+def test_format_trade_line_long_negative_pnl_signs():
+    """Stopped-out LONG: pnl negative, pnl_pct negative → -$... (-...%) signs."""
+    t = models.TradeResult(
+        direction=Direction.LONG,
+        model=Model.BREAKOUT,
+        qty=10,
+        entry_price=Decimal("100.00"),
+        exit_price=Decimal("98.00"),
+        pnl=Decimal("-20.00"),
+        pnl_pct=Decimal("-20.00") / Decimal("10000.00"),
+        exit_reason="STOP",
+    )
+    line = format_trade_line(t)
+    assert "LONG" in line
+    assert "→" in line
+    assert "-$20.00" in line
+    assert "(-0.20%)" in line
+    assert "[STOP]" in line

@@ -80,6 +80,11 @@ class DiscordClient:
             )
         return ch
 
+    async def send_embed(self, embed: discord.Embed) -> None:
+        """Send an embed to the configured channel."""
+        channel = await self.resolve_channel()
+        await channel.send(embed=embed)
+
     async def close(self) -> None:
         """Close the gateway connection and cancel the background task."""
         try:

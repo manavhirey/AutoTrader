@@ -137,6 +137,12 @@ write-ups live in the `.superpowers/sdd/progress.md` roll-up. (Beyond this list,
   security review.)*
 
 ### Resolved-during-build findings log (audit trail; fixed in the named commit)
+- [x] **[T36 reporting] DiscordReporter hardening + integration gap.** Added the missing `DiscordClient.send_embed`
+  (reporter would have AttributeError'd in production — tests only had a fake). Fixed: embed "Trades" field guarded
+  against Discord's 1024-char limit (was a silent EOD-report drop at high trade counts, High); `_range_meta` absent
+  default → low-confidence (was falsely reporting full "15/15"); Discord sends made best-effort (try/except+log) so a
+  post failure can't crash EOD reporting; spec Unicode arrow `→`; +tests (overflow, send-failure, zero-P/L, no-trade).
+  Note for orchestrator (Task 43): it must stash `client.opening_range` for the bars_present/T caveat. Fixed in T36 commit.
 - [x] **[T34 reporting] P/L math verified correct + edge guards.** Review confirmed LONG/SHORT sign, share-weighting,
   qty=min, pnl_pct-as-fraction, and wins+losses+breakevens==len(trades) are all correct, and the module is pure.
   Added `start_equity <= 0` guards (clear ValueError instead of cryptic DivisionByZero) and tests (SHORT

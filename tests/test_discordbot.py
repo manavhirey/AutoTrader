@@ -121,3 +121,30 @@ async def test_resolve_channel_raises_when_not_messageable():
     with pytest.raises(RuntimeError, match="not messageable"):
         await dc.resolve_channel()
     await dc.close()
+
+
+async def test_send_embed_forwards_embed_to_channel_send():
+    """send_embed resolves the channel and calls channel.send(embed=...)."""
+    import discord as discord_lib
+
+    class _RecordingChannel(discord.abc.Messageable):
+        def __init__(self, cid: int) -> None:
+            self.id = cid
+            self.sent_embeds: list[discord_lib.Embed] = []
+
+        async def _get_channel(self):  # type: ignore[override]
+            return self  # type: ignore[return-value]
+
+        async def send(self, *, embed=None, **kwargs):  # type: ignore[override]
+            self.sent_embeds.append(embed)
+
+    bot = _FakeBot()
+    ch = _RecordingChannel(42)
+    bot._cache[42] = ch
+    dc = DiscordClient(token="tok", channel_id=42, bot=bot)
+    await dc.start_in_background()
+    embed = discord_lib.Embed(title="Test embed")
+    await dc.send_embed(embed)
+    assert len(ch.sent_embeds) == 1
+    assert ch.sent_embeds[0] is embed
+    await dc.close()
