@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from .models import Candle, Direction
+from .models import Candle, Direction, Displacement
 
 
 def _true_range(bar: Candle, prev_close: Decimal) -> Decimal:
@@ -129,3 +129,20 @@ def find_swing(
         if ok:
             return pivot
     return None
+
+
+def find_impulse(
+    window: list[Candle], atr: Decimal, mult: float
+) -> Displacement | None:
+    """§12: last candle with range >= atr*mult AND a strong close (own direction)."""
+    if not window:
+        return None
+    c = window[-1]
+    rng = c.high - c.low
+    threshold = atr * Decimal(str(mult))
+    if rng < threshold:
+        return None
+    direction = Direction.LONG if c.close >= c.open else Direction.SHORT
+    if not is_strong_close(c, direction, 0.60, 0.70):
+        return None
+    return Displacement(type="IMPULSE", upper_candle=c, lower_candle=c, size=rng)

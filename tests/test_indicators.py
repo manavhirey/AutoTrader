@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from orb_bot.indicators import ATR, find_swing, is_strong_close, within
+from orb_bot.indicators import ATR, find_impulse, find_swing, is_strong_close, within
 from orb_bot.models import Candle, Direction
 
 ET = ZoneInfo("America/New_York")
@@ -241,3 +241,45 @@ def test_find_swing_respects_lookback_slice():
         _hilo(4, 1, minute=6),
     ]
     assert find_swing(bars, k=1, lookback=4, kind="high") == Decimal("10")
+
+
+# ---------------------------------------------------------------------------
+# find_impulse tests
+# ---------------------------------------------------------------------------
+
+
+def test_find_impulse_long_match():
+    # last candle: rng=high-low=10 >= 2*1.5=3 and strong bullish close
+    win = [
+        _candle(1, 2, 0, "1.5"),
+        _candle(1, 10, 0, "9.5"),  # rng=10, body=8.5, bullish, close near high
+    ]
+    disp = find_impulse(win, atr=Decimal("2"), mult=1.5)
+    assert disp is not None
+    assert disp.type == "IMPULSE"
+    assert disp.size == Decimal("10")
+    assert disp.upper_candle is win[-1]
+    assert disp.lower_candle is win[-1]
+
+
+def test_find_impulse_short_match():
+    win = [_candle(9, 10, 0, "0.5")]  # rng=10, bearish strong close near low
+    disp = find_impulse(win, atr=Decimal("2"), mult=1.5)
+    assert disp is not None
+    assert disp.size == Decimal("10")
+
+
+def test_find_impulse_none_small_range():
+    # rng=2 < threshold 3 -> None even though strong close
+    win = [_candle(0, 2, 0, "1.9")]
+    assert find_impulse(win, atr=Decimal("2"), mult=1.5) is None
+
+
+def test_find_impulse_none_not_strong_close():
+    # big range but weak/centered body -> not a strong close -> None
+    win = [_candle("4.5", 10, 0, "5.5")]  # body=1, rng=10 -> body ratio 0.1
+    assert find_impulse(win, atr=Decimal("2"), mult=1.5) is None
+
+
+def test_find_impulse_empty_window():
+    assert find_impulse([], atr=Decimal("2"), mult=1.5) is None
