@@ -12,7 +12,10 @@ from orb_bot.models import (
     AccountSnapshot,
     Candle,
     ClockInfo,
+    Direction,
+    Model,
     OrderResult,
+    Setup,
 )
 
 ET = ZoneInfo("America/New_York")
@@ -338,3 +341,183 @@ async def test_preflight_seeds_atr_with_nonempty_hist():
     assert ok is True
     assert engine.seeded == hist
     assert o.feed.hist_calls and o.feed.hist_calls[0][1] == 15  # tf_min
+
+
+# ---------------------------------------------------------------------------
+# Task 39: sizing, equity_for_sizing, revalidate_setup
+# ---------------------------------------------------------------------------
+
+
+def _setup_long():
+    return Setup(
+        direction=Direction.LONG,
+        model=Model.BREAKOUT,
+        entry=Decimal("100.00"),
+        stop=Decimal("99.00"),
+        target=Decimal("102.00"),
+        rr=2.0,
+        reason=["breakout"],
+    )
+
+
+async def test_sizing_floors_whole_shares():
+    broker = FakeBroker(equity=Decimal("100000"))
+    o = _make_orch(broker)
+    # risk_per_trade_pct default 0.5 => 100000*0.5/100 = 500 risk; /1.00 stop dist = 500
+    # buying_power large enough that risk is the binding constraint
+    qty = o._sizing(Decimal("100000"), _setup_long(), Decimal("100000000"))
+    assert qty == 500
+
+
+async def test_sizing_floor_rounds_down():
+    broker = FakeBroker()
+    o = _make_orch(broker)
+    s = Setup(
+        direction=Direction.LONG,
+        model=Model.BREAKOUT,
+        entry=Decimal("100.00"),
+        stop=Decimal("99.30"),  # stop dist 0.70
+        target=Decimal("101.40"),
+        rr=2.0,
+        reason=["x"],
+    )
+    # 100000*0.5/100=500 ; 500/0.70 = 714.28 -> 714
+    # buying_power large enough that risk is the binding constraint
+    assert o._sizing(Decimal("100000"), s, Decimal("100000000")) == 714
+
+
+async def test_sizing_rejects_below_one_share():
+    broker = FakeBroker()
+    o = _make_orch(broker)
+    s = Setup(
+        direction=Direction.LONG,
+        model=Model.BREAKOUT,
+        entry=Decimal("100.00"),
+        stop=Decimal("0.01"),  # huge stop dist 99.99
+        target=Decimal("300.00"),
+        rr=2.0,
+        reason=["x"],
+    )
+    # 100*0.5/100=0.5 risk over 99.99 -> 0.005 -> floor 0 -> reject
+    assert o._sizing(Decimal("100"), s, Decimal("100000000")) == 0
+
+
+async def test_sizing_capped_by_buying_power():
+    broker = FakeBroker()
+    o = _make_orch(broker)
+    # risk-sizes to 500 (equity=100000, stop_dist=1.00) but buying_power only
+    # affords 100 shares at entry=100 (10000/100=100)
+    qty = o._sizing(Decimal("100000"), _setup_long(), Decimal("10000"))
+    assert qty == 100
+
+
+async def test_sizing_short_direction():
+    broker = FakeBroker()
+    o = _make_orch(broker)
+    s = Setup(
+        direction=Direction.SHORT,
+        model=Model.BREAKOUT,
+        entry=Decimal("100.00"),
+        stop=Decimal("101.00"),  # stop dist abs(100-101)=1.00
+        target=Decimal("98.00"),
+        rr=2.0,
+        reason=["breakout"],
+    )
+    # 100000*0.5/100=500 risk; /1.00 stop dist = 500
+    qty = o._sizing(Decimal("100000"), s, Decimal("100000000"))
+    assert qty == 500
+
+
+async def test_sizing_zero_equity_returns_zero(caplog):
+    import logging
+
+    broker = FakeBroker()
+    o = _make_orch(broker)
+    with caplog.at_level(logging.WARNING):
+        qty = o._sizing(Decimal("0"), _setup_long(), Decimal("100000000"))
+    assert qty == 0
+
+
+async def test_equity_for_sizing_uses_fixed_when_configured():
+    broker = FakeBroker(equity=Decimal("100000"))
+    settings = Settings(
+        strategy=StrategyConfig(equity_source="fixed", fixed_equity=Decimal("25000")),
+        run=RunConfig(symbol="AAPL"),
+    )
+    o = _make_orch(broker, settings=settings)
+    o.start_equity = Decimal("100000")
+    assert o._equity_for_sizing() == Decimal("25000")
+
+
+async def test_equity_for_sizing_uses_live_start_equity():
+    broker = FakeBroker()
+    o = _make_orch(broker)
+    o.start_equity = Decimal("80000")
+    assert o._equity_for_sizing() == Decimal("80000")
+
+
+def test_revalidate_setup_passes_when_no_live_tick():
+    o = _make_orch(FakeBroker())
+    o._last_1m = None
+    assert o._revalidate_setup(_setup_long()) is True
+
+
+def test_revalidate_setup_rejects_long_when_price_below_stop():
+    o = _make_orch(FakeBroker())
+    # latest 1m close has collapsed below the long's stop -> no longer viable
+    o._last_1m = _candle_1m(9, 50, price=Decimal("98.50"))
+    assert o._revalidate_setup(_setup_long()) is False
+
+
+def test_revalidate_setup_passes_long_when_price_in_range():
+    o = _make_orch(FakeBroker())
+    o._last_1m = _candle_1m(9, 50, price=Decimal("100.20"))
+    assert o._revalidate_setup(_setup_long()) is True
+
+
+def test_equity_for_sizing_returns_zero_when_start_equity_is_none():
+    broker = FakeBroker()
+    o = _make_orch(broker)
+    # start_equity is None (preflight not yet run)
+    assert o.start_equity is None
+    assert o._equity_for_sizing() == Decimal("0")
+
+
+def _setup_short():
+    return Setup(
+        direction=Direction.SHORT,
+        model=Model.BREAKOUT,
+        entry=Decimal("100.00"),
+        stop=Decimal("101.00"),
+        target=Decimal("98.00"),
+        rr=2.0,
+        reason=["breakout"],
+    )
+
+
+def test_revalidate_setup_rejects_short_when_price_at_or_above_stop():
+    o = _make_orch(FakeBroker())
+    # price >= stop (101.00) -> short is blown past its invalidation level
+    o._last_1m = _candle_1m(9, 50, price=Decimal("101.20"))
+    assert o._revalidate_setup(_setup_short()) is False
+
+
+def test_revalidate_setup_passes_short_when_price_in_range():
+    o = _make_orch(FakeBroker())
+    # price between target (98) and stop (101) -> valid short setup
+    o._last_1m = _candle_1m(9, 50, price=Decimal("99.50"))
+    assert o._revalidate_setup(_setup_short()) is True
+
+
+def test_revalidate_setup_rejects_short_when_price_overshot_target():
+    o = _make_orch(FakeBroker())
+    # price well below target (98) -> has already overshot downward; tol=0 for FakeEngine
+    o._last_1m = _candle_1m(9, 50, price=Decimal("95.00"))
+    assert o._revalidate_setup(_setup_short()) is False
+
+
+def test_revalidate_setup_rejects_long_when_price_overshot_target():
+    o = _make_orch(FakeBroker())
+    # price well above target (102) -> has already overshot upward; tol=0 for FakeEngine
+    o._last_1m = _candle_1m(9, 50, price=Decimal("103.00"))
+    assert o._revalidate_setup(_setup_long()) is False

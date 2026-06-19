@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal
 from zoneinfo import ZoneInfo
 
 from orb_bot import logconf
@@ -13,8 +13,10 @@ from orb_bot.aggregation import Aggregator
 from orb_bot.execution import alpaca as execution_alpaca
 from orb_bot.models import (
     Candle,
+    Direction,
     Fill,
     Model,
+    Setup,
     TradeResult,
 )
 
@@ -161,4 +163,53 @@ class Orchestrator:
         )
         if hist:
             self.engine.seed_atr(hist)
+        return True
+
+    def _equity_for_sizing(self) -> Decimal:
+        if self.cfg.equity_source == "fixed":
+            return Decimal(self.cfg.fixed_equity)
+        return self.start_equity if self.start_equity is not None else Decimal("0")
+
+    def _sizing(self, equity: Decimal, setup: Setup, buying_power: Decimal) -> int:
+        if equity <= 0:
+            self.log.warning("sizing_zero_equity")
+            return 0
+        stop_dist = abs(setup.entry - setup.stop)
+        if stop_dist <= 0:
+            return 0
+        risk_dollars = (equity * Decimal(str(self.cfg.risk_per_trade_pct))) / Decimal("100")
+        raw = (risk_dollars / stop_dist).to_integral_value(rounding=ROUND_DOWN)
+        qty = int(raw)
+        if setup.entry > 0:
+            bp_qty = int(
+                (buying_power / setup.entry).to_integral_value(rounding=ROUND_DOWN)
+            )
+            qty = min(qty, bp_qty)
+        return qty if qty >= 1 else 0
+
+    def _revalidate_setup(self, setup: Setup) -> bool:
+        """Stale-price re-validation (spec §8 step 6 / §16): between SetupProposed
+        and order submission the price may have run away from the level. Reject if
+        the latest 1m transport price is no longer within tolerance / still
+        reachable for the trade's direction."""
+        last = self._last_1m
+        if last is None:
+            return True  # no live tick yet (e.g. backfilled OR) -> do not block
+        price = last.close
+        tol = Decimal(str(self.cfg.retest_tolerance_atr)) * (
+            self.engine.ctx.atr.value if getattr(self.engine, "ctx", None) else Decimal("0")
+        )
+        if setup.direction == Direction.LONG:
+            # price must not have collapsed below the stop and must remain within
+            # tolerance below the target (still a viable long entry).
+            if price <= setup.stop:
+                return False
+            if price > setup.target + tol:
+                return False
+            return True
+        # SHORT: mirror image.
+        if price >= setup.stop:
+            return False
+        if price < setup.target - tol:
+            return False
         return True

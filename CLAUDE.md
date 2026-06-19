@@ -158,7 +158,19 @@ write-ups live in the `.superpowers/sdd/progress.md` roll-up. (Beyond this list,
   which can emit naive (no-offset) ISO timestamps depending on the host TZ — ambiguous for trade-log forensics.
   Use `utc=True` (Z suffix) or an explicit `%z` offset. *(Found: T37 review; Low, current behavior is defensible.)*
 
+- [ ] **[HIGH] Gate SHORT setups on `AccountSnapshot.shorting_enabled` (orchestrator `_react`, Task 40).** Nothing
+  checks `shorting_enabled` before submitting a SHORT bracket; on a cash/non-margin account Alpaca rejects it and the
+  setup silently fails. `_react` (where direction + the account snapshot are both in scope) must reject/skip a SHORT
+  when `shorting_enabled` is False. *(Found: T39 security review.)*
+- [ ] **[LOW] Expose a clean engine ATR accessor instead of `getattr(self.engine, "ctx", None)`.** `_revalidate_setup`
+  attribute-sniffs `engine.ctx.atr.value`; a rename would silently make `tol=0` (toothless stale-price gate). Add an
+  `Engine.current_atr -> Decimal | None` accessor and call it. *(Found: T39 review; pragmatic today, real engine always has ctx.)*
+
 ### Resolved-during-build findings log (audit trail; fixed in the named commit)
+- [x] **[T39 sizing] buying-power cap + coverage.** Core risk-sizing math verified correct (floor, reject<1, LONG/SHORT
+  revalidate symmetry). Added a buying-power cap (`qty = min(risk_qty, floor(buying_power/entry))`) so a wide-stop/large-equity
+  size can't exceed buying power → silent Alpaca rejection; zero-equity now logs; +SHORT-sizing / SHORT-revalidate /
+  overshoot / start_equity-None tests. Fixed in T39 commit.
 - [x] **[T38 reconciliation correctness] engine + orchestrator hardening.** Fixed money-safety bugs in the §16
   restart path: P/L no longer computed against a fabricated `$0` entry (`filled_avg_price or Decimal('0')` removed;
   unknown entry → engine `_entry_price=None` → ~0 P/L, not fictitious); the engine is now adopted UNCONDITIONALLY on a
