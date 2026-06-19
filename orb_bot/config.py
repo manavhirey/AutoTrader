@@ -7,7 +7,7 @@ from datetime import time
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class StrategyConfig(BaseModel):
@@ -80,6 +80,104 @@ class StrategyConfig(BaseModel):
     logging_level: str = "INFO"
     logging_dir: str = "logs/"
 
+    # --- field-level validators (fail fast, per spec §7) ---
+    @field_validator("flatten_buffer_min")
+    @classmethod
+    def _buffer_nonneg(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("flatten_buffer_min must be >= 0")
+        return v
+
+    @field_validator("risk_reward_ratio")
+    @classmethod
+    def _rr_positive(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError("risk_reward_ratio must be > 0")
+        return v
+
+    @field_validator("risk_per_trade_pct")
+    @classmethod
+    def _risk_pct_bounds(cls, v: float) -> float:
+        if not (0 < v <= 100):
+            raise ValueError("risk_per_trade_pct must satisfy 0 < pct <= 100")
+        return v
+
+    @field_validator("enable_reversal")
+    @classmethod
+    def _reversal_deferred(cls, v: bool) -> bool:
+        if v:
+            raise ValueError("enable_reversal is DEFERRED this build; must be False")
+        return v
+
+    @field_validator("require_higher_tf_bias")
+    @classmethod
+    def _htf_bias_deferred(cls, v: bool) -> bool:
+        if v:
+            raise ValueError("require_higher_tf_bias is DEFERRED this build; must be False")
+        return v
+
+    @field_validator("range_day_enables")
+    @classmethod
+    def _enables_must_be_implemented(cls, v: list[str]) -> list[str]:
+        implemented = {"breakout", "retest"}  # reversal deferred this build
+        bad = [m for m in v if m not in implemented]
+        if bad:
+            raise ValueError(
+                f"range_day_enables lists unimplemented model(s): {bad}"
+            )
+        return v
+
+    # --- whole-model validators (cross-field, per spec §7) ---
+    @model_validator(mode="after")
+    def _validate_cross_fields(self) -> StrategyConfig:
+        T = self.range_timeframe_min
+
+        # flatten_at > session_open
+        if self.flatten_at <= self.session_open:
+            raise ValueError("flatten_at must be after session_open")
+
+        # single-timeframe gate: confirm == entry == range
+        if not (self.confirm_timeframe_min == self.entry_timeframe_min == T):
+            raise ValueError(
+                "single-timeframe gate: confirm_timeframe_min == "
+                "entry_timeframe_min == range_timeframe_min required"
+            )
+
+        # T in allowed set
+        if T not in (1, 5, 15):
+            raise ValueError("range_timeframe_min (T) must be one of {1, 5, 15}")
+
+        # whole-candle trading window
+        if self.trading_window_min % T != 0:
+            raise ValueError(
+                "trading_window_min must be a whole multiple of range_timeframe_min"
+            )
+
+        # retest wait must fit the window
+        if self.retest_max_wait_candles > self.trading_window_min // T:
+            raise ValueError(
+                "retest_max_wait_candles must fit the trading window "
+                "(<= trading_window_min / range_timeframe_min)"
+            )
+
+        # timeframe-scaling gate: ATR on the run's timeframe
+        if self.atr_timeframe_min != T:
+            raise ValueError("atr_timeframe_min must == range_timeframe_min")
+
+        # opening T-bar holds at most T one-minute children
+        if not (1 <= self.or_min_bars <= T):
+            raise ValueError("or_min_bars must satisfy 1 <= or_min_bars <= range_timeframe_min")
+
+        # swing window must cover a full fractal pivot
+        if self.swing_lookback < 2 * self.swing_fractal_k + 1:
+            raise ValueError("swing_lookback must be >= 2 * swing_fractal_k + 1")
+
+        # fixed equity source requires a value
+        if self.equity_source == "fixed" and self.fixed_equity is None:
+            raise ValueError("equity_source == 'fixed' requires fixed_equity")
+
+        return self
+
 
 class RunConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -88,3 +186,11 @@ class RunConfig(BaseModel):
     live: bool = False
     feed: Literal["IEX", "SIP"] = "IEX"
     allow_live_iex: bool = False
+
+    @model_validator(mode="after")
+    def _live_gate(self) -> RunConfig:
+        if self.live and self.feed != "SIP" and not self.allow_live_iex:
+            raise ValueError(
+                "live trading requires feed='SIP' (or set allow_live_iex=True to override)"
+            )
+        return self
