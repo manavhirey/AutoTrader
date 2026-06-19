@@ -93,3 +93,93 @@ async def test_candles_blocks_until_next_bar_enqueued():
     await f._on_bar(_mk_bar(0, 55.0))
     candle = await asyncio.wait_for(task, timeout=1.0)
     assert candle.close == Decimal("55.0")
+
+
+# ---------------------------------------------------------------------------
+# Task 22: stream lifecycle tests (start / close / sentinel)
+# ---------------------------------------------------------------------------
+
+class FakeStream:
+    """Stand-in for alpaca-py StockDataStream (records the §13 lifecycle calls)."""
+
+    def __init__(self):
+        self.subscribed = None
+        self.run_forever_started = False
+        self.stop_ws_called = False
+        self._run_block = asyncio.Event()  # _run_forever hangs until cancelled
+
+    def subscribe_bars(self, handler, *symbols):
+        self.subscribed = (handler, symbols)
+
+    async def _run_forever(self):
+        self.run_forever_started = True
+        await self._run_block.wait()  # mimic a long-lived ws loop
+
+    async def stop_ws(self):
+        self.stop_ws_called = True
+
+
+async def test_start_subscribes_and_schedules_run_forever():
+    fake = FakeStream()
+    f = feed_alpaca.AlpacaFeed(
+        api_key="k", secret_key="s", symbol="SPY", feed="IEX",
+        stream_factory=lambda **_: fake,
+    )
+    f.start()
+    await asyncio.sleep(0)  # let the scheduled task start
+
+    handler, symbols = fake.subscribed
+    assert handler == f._on_bar
+    assert symbols == ("SPY",)
+    assert fake.run_forever_started is True
+    assert f._run_task is not None and not f._run_task.done()
+
+    await f.close()
+
+
+async def test_close_stops_ws_and_cancels_run_task_idempotently():
+    fake = FakeStream()
+    f = feed_alpaca.AlpacaFeed(
+        api_key="k", secret_key="s", symbol="SPY", feed="IEX",
+        stream_factory=lambda **_: fake,
+    )
+    f.start()
+    await asyncio.sleep(0)
+
+    await f.close()
+    assert fake.stop_ws_called is True
+    assert f._run_task is None or f._run_task.done()
+
+    # idempotent: a second close is a no-op and does not raise
+    await f.close()
+
+
+async def test_close_before_start_is_safe():
+    f = feed_alpaca.AlpacaFeed(
+        api_key="k", secret_key="s", symbol="SPY", feed="IEX",
+    )
+    await f.close()  # must not raise
+
+
+async def test_candles_terminates_after_close():
+    """close() puts a sentinel on the queue so async for exits cleanly."""
+    fake = FakeStream()
+    f = feed_alpaca.AlpacaFeed(
+        api_key="k", secret_key="s", symbol="SPY", feed="IEX",
+        stream_factory=lambda **_: fake,
+    )
+    f.start()
+    await asyncio.sleep(0)
+
+    # Push one real bar, then close. Queue will contain: [bar, SENTINEL].
+    await f._on_bar(_mk_bar(0, 99.0))
+    await f.close()
+
+    # Collect everything from candles() – must not hang.
+    collected = []
+    async for candle in f.candles():
+        collected.append(candle)
+
+    # The sentinel terminates the iterator; the one bar is drained first.
+    assert len(collected) == 1
+    assert collected[0].close == Decimal("99.0")

@@ -10,6 +10,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from datetime import timedelta
 from decimal import Decimal
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from orb_bot.models import Candle
@@ -36,6 +37,18 @@ def _bar_to_candle(bar) -> Candle:
     )
 
 
+_SENTINEL = object()  # put on the queue by close() to terminate candles()
+
+
+def _default_stream_factory(*, api_key: str, secret_key: str, feed: str):
+    """Build a real alpaca-py StockDataStream. alpaca-py imported lazily here so
+    the SDK stays isolated to this call site (§4/§13)."""
+    from alpaca.data.enums import DataFeed
+    from alpaca.data.live.stock import StockDataStream
+
+    return StockDataStream(api_key, secret_key, feed=DataFeed[feed])
+
+
 class AlpacaFeed:
     """DataFeed: subscribes to 1m StockDataStream bars and exposes them as an
     async iterator of transport Candles (timeframe_min=1).
@@ -55,14 +68,16 @@ class AlpacaFeed:
         symbol: str,
         feed: str = "IEX",
         queue_maxsize: int = 10000,
+        stream_factory=None,
     ) -> None:
         self._api_key = api_key
         self._secret_key = secret_key
         self._symbol = symbol
         self._feed = feed
-        self._queue: asyncio.Queue[Candle] = asyncio.Queue(maxsize=queue_maxsize)
-        self._stream = None  # lazily built StockDataStream
-        self._run_task: asyncio.Task | None = None
+        self._queue: asyncio.Queue[Candle | object] = asyncio.Queue(maxsize=queue_maxsize)
+        self._stream_factory = stream_factory or _default_stream_factory
+        self._stream: Any = None  # built in start()
+        self._run_task: asyncio.Task[Any] | None = None
         self._closed = False
 
     async def _on_bar(self, bar) -> None:
@@ -70,9 +85,42 @@ class AlpacaFeed:
         await self._queue.put(_bar_to_candle(bar))
 
     def candles(self) -> AsyncIterator[Candle]:
-        """Drain the queue, yielding 1m transport Candles in FIFO order."""
+        """Drain the queue, yielding 1m transport Candles in FIFO order.
+
+        Terminates cleanly when close() puts the sentinel on the queue.
+        """
         async def _drain():
             while True:
-                candle = await self._queue.get()
-                yield candle
+                item = await self._queue.get()
+                if item is _SENTINEL:
+                    return
+                yield item
         return _drain()
+
+    def start(self) -> None:
+        """Build the stream, subscribe the 1m-bar handler, and schedule the SDK's
+        _run_forever() as a task on the running loop (never stream.run(), which
+        calls asyncio.run() and blocks -- §13 loop trap)."""
+        self._stream = self._stream_factory(
+            api_key=self._api_key, secret_key=self._secret_key, feed=self._feed,
+        )
+        self._stream.subscribe_bars(self._on_bar, self._symbol)
+        self._run_task = asyncio.ensure_future(self._stream._run_forever())
+
+    async def close(self) -> None:
+        """Idempotent shutdown: stop the ws, then cancel + await the run task.
+        Uses stop_ws() (async, same-loop) -- never the sync stream.stop() (§13).
+        Puts a sentinel on the queue so any active candles() iterator exits."""
+        if self._closed:
+            return
+        self._closed = True
+        await self._queue.put(_SENTINEL)
+        if self._stream is not None:
+            await self._stream.stop_ws()
+        if self._run_task is not None:
+            self._run_task.cancel()
+            try:
+                await self._run_task
+            except asyncio.CancelledError:
+                pass
+            self._run_task = None
