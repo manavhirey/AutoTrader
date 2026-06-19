@@ -1,1 +1,1 @@
-"""I/O layer: trade approval gates (Approver implementations)."""
+"""Approval-gate implementations: AutoApprover (paper) + DiscordApprover (live)."""

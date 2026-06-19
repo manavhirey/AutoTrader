@@ -130,6 +130,12 @@ write-ups live in the `.superpowers/sdd/progress.md` roll-up. (Beyond this list,
 - [ ] **[LOW-ops] Restrict the bot's OAuth invite to the single intended Discord server** so the `guilds` intent
   can't broaden visibility if the bot is added elsewhere. Deployment/operational, not code. *(Found: T31 review.)*
 
+- [ ] **[HIGH-sec] Enforce the "AutoApprover never in live mode" invariant in the wiring (tasks 40/45).**
+  `AutoApprover.request()` auto-APPROVEs every trade with no human gate — correct for paper/backtest, catastrophic
+  if it ever backs live trading. The class can't self-gate; the orchestrator/`__main__` MUST hard-assert that
+  `run.live` ⇒ the approver is `DiscordApprover` (and paper ⇒ AutoApprover), failing fast otherwise. *(Found: T32
+  security review.)*
+
 ### Resolved-during-build findings log (audit trail; fixed in the named commit)
 - [x] **[T31 High + hardening] DiscordClient startup/fail-closed.** `start_in_background` no longer hangs forever on
   a failed `bot.start()` (bad token/network) — it races readiness against task completion and re-raises the start
