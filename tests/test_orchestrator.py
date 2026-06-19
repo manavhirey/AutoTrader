@@ -10,12 +10,14 @@ from orb_bot import orchestrator as orch_mod
 from orb_bot.config import RunConfig, Settings, StrategyConfig
 from orb_bot.models import (
     AccountSnapshot,
+    ApprovalRequest,
     Candle,
     ClockInfo,
     Direction,
     Model,
     OrderResult,
     Setup,
+    SetupProposed,
 )
 
 ET = ZoneInfo("America/New_York")
@@ -23,10 +25,14 @@ ET = ZoneInfo("America/New_York")
 
 @pytest.fixture(autouse=True)
 def _alpaca_env(monkeypatch):
-    # Function-scoped, auto-reverted: inject the Alpaca secrets via monkeypatch so
-    # Settings() can load them, WITHOUT mutating global os.environ at import time.
+    # Function-scoped, auto-reverted: inject the Alpaca + Discord secrets via
+    # monkeypatch so Settings() can load them (including live mode),
+    # WITHOUT mutating global os.environ at import time.
     monkeypatch.setenv("ALPACA_KEY", "test-key")
     monkeypatch.setenv("ALPACA_SECRET", "test-secret")
+    monkeypatch.setenv("DISCORD_TOKEN", "test-discord-token")
+    monkeypatch.setenv("DISCORD_CHANNEL_ID", "123456789")
+    monkeypatch.setenv("DISCORD_APPROVER_USER_ID", "987654321")
 
 
 def _candle_1m(h, m, price=Decimal("100"), tf=1):
@@ -521,3 +527,220 @@ def test_revalidate_setup_rejects_long_when_price_overshot_target():
     # price well above target (102) -> has already overshot upward; tol=0 for FakeEngine
     o._last_1m = _candle_1m(9, 50, price=Decimal("103.00"))
     assert o._revalidate_setup(_setup_long()) is False
+
+
+# ---------------------------------------------------------------------------
+# Task 40: _react (SetupProposed → approval → bracket) + _build_approval_request
+# ---------------------------------------------------------------------------
+
+
+def _or_set(o):
+    # engine context the orchestrator reads for OR levels in the approval request
+    class _OR:
+        high = Decimal("101.00")
+        low = Decimal("99.00")
+        bars_present = 15
+        low_confidence = False
+        feed = "IEX"
+    o.engine.opening_range = _OR()
+
+
+async def test_react_setup_proposed_paper_auto_approve_submits_bracket():
+    broker = FakeBroker(equity=Decimal("100000"))
+    approver = FakeApprover(decision="APPROVE")
+    reporter = FakeReporter()
+    o = _make_orch(broker, approver=approver, reporter=reporter)
+    o.start_equity = Decimal("100000")
+    _or_set(o)
+    await o._react(SetupProposed(setup=_setup_long()))
+    assert len(broker.submitted) == 1
+    sub_setup, sub_qty = broker.submitted[0]
+    assert sub_qty == 500
+    assert approver.requests, "approver.request must be called (mode-uniform)"
+    assert o.engine.approvals == ["APPROVE"]
+    assert reporter.trade_taken_calls == [(_setup_long(), 500, "PAPER")]
+
+
+async def test_react_live_reject_does_not_submit_no_slot():
+    broker = FakeBroker(equity=Decimal("100000"))
+    approver = FakeApprover(decision="REJECT")
+    live_settings = Settings(
+        strategy=StrategyConfig(), run=RunConfig(symbol="AAPL", live=True, feed="SIP")
+    )
+    o = _make_orch(broker, approver=approver, settings=live_settings)
+    o.start_equity = Decimal("100000")
+    _or_set(o)
+    await o._react(SetupProposed(setup=_setup_long()))
+    assert broker.submitted == []
+    assert o.engine.approvals == ["REJECT"]
+    assert o.reporter.trade_taken_calls == []
+
+
+async def test_react_live_timeout_does_not_submit():
+    broker = FakeBroker(equity=Decimal("100000"))
+    approver = FakeApprover(decision="TIMEOUT")
+    live_settings = Settings(
+        strategy=StrategyConfig(), run=RunConfig(symbol="AAPL", live=True, feed="SIP")
+    )
+    o = _make_orch(broker, approver=approver, settings=live_settings)
+    o.start_equity = Decimal("100000")
+    _or_set(o)
+    await o._react(SetupProposed(setup=_setup_long()))
+    assert broker.submitted == []
+    assert o.engine.approvals == ["TIMEOUT"]
+
+
+async def test_react_setup_proposed_qty_below_one_rejects_before_approval():
+    broker = FakeBroker(equity=Decimal("100"))
+    approver = FakeApprover(decision="APPROVE")
+    o = _make_orch(broker, approver=approver)
+    o.start_equity = Decimal("100")
+    _or_set(o)
+    s = Setup(
+        direction=Direction.LONG,
+        model=Model.BREAKOUT,
+        entry=Decimal("100.00"),
+        stop=Decimal("0.01"),
+        target=Decimal("300.00"),
+        rr=2.0,
+        reason=["x"],
+    )
+    await o._react(SetupProposed(setup=s))
+    assert broker.submitted == []
+    assert approver.requests == [], "qty<1 must reject before any approval request"
+
+
+def _setup_retest():
+    return Setup(
+        direction=Direction.LONG,
+        model=Model.RETEST,
+        entry=Decimal("100.00"),
+        stop=Decimal("99.00"),
+        target=Decimal("102.00"),
+        rr=2.0,
+        reason=["retest"],
+    )
+
+
+async def test_react_setup_proposed_records_last_model_for_attribution():
+    # MED #11: a RETEST setup must set self._last_model = RETEST (not BREAKOUT).
+    broker = FakeBroker(equity=Decimal("100000"))
+    o = _make_orch(broker, approver=FakeApprover(decision="APPROVE"))
+    o.start_equity = Decimal("100000")
+    _or_set(o)
+    await o._react(SetupProposed(setup=_setup_retest()))
+    assert len(broker.submitted) == 1
+    assert o._last_model == Model.RETEST
+
+
+async def test_react_setup_proposed_stale_price_rejects_before_approval():
+    # HIGH #9: latest 1m price below the long's stop -> reject before approver.
+    broker = FakeBroker(equity=Decimal("100000"))
+    approver = FakeApprover(decision="APPROVE")
+    o = _make_orch(broker, approver=approver)
+    o.start_equity = Decimal("100000")
+    _or_set(o)
+    o._last_1m = _candle_1m(9, 50, price=Decimal("98.00"))
+    await o._react(SetupProposed(setup=_setup_long()))
+    assert broker.submitted == []
+    assert approver.requests == [], "stale-price reject must precede any approval request"
+
+
+async def test_build_approval_request_carries_runtime_data():
+    broker = FakeBroker(equity=Decimal("100000"))
+    o = _make_orch(broker)
+    o.start_equity = Decimal("100000")
+    _or_set(o)
+    req = o._build_approval_request(_setup_long(), 500)
+    assert isinstance(req, ApprovalRequest)
+    assert req.symbol == "AAPL"
+    assert req.qty == 500
+    assert req.mode == "PAPER"
+    assert req.feed == "IEX"
+    assert req.or_high == Decimal("101.00")
+    assert req.or_low == Decimal("99.00")
+    assert req.bars_present == 15
+    assert req.approval_ttl_s == StrategyConfig().approval_timeout_s
+    assert req.risk_dollars == pytest.approx(500.0)
+
+
+async def test_react_short_rejected_when_shorting_disabled():
+    # Task 40 adaptation: SHORT setup with shorting_enabled=False must be rejected
+    # BEFORE the approver is called and BEFORE submit_bracket.
+    class NoShortBroker(FakeBroker):
+        async def get_account(self):
+            from orb_bot.models import AccountSnapshot
+            return AccountSnapshot(
+                equity=self._equity,
+                buying_power=self._equity,
+                shorting_enabled=False,
+            )
+
+    broker = NoShortBroker(equity=Decimal("100000"))
+    approver = FakeApprover(decision="APPROVE")
+    o = _make_orch(broker, approver=approver)
+    o.start_equity = Decimal("100000")
+    _or_set(o)
+    await o._react(SetupProposed(setup=_setup_short()))
+    assert broker.submitted == [], "SHORT must not be submitted when shorting disabled"
+    assert approver.requests == [], "approver must not be called when shorting disabled"
+
+
+# ---------------------------------------------------------------------------
+# Task 40 review fixes: error-handling paths
+# ---------------------------------------------------------------------------
+
+
+async def test_react_submit_bracket_failure_is_failsafe():
+    # Fix A: if submit_bracket raises, _react must not raise, reporter.trade_taken
+    # must NOT be called, and _last_model must remain None (no false attribution).
+    class RaisingSubmitBroker(FakeBroker):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.raise_on_submit = True
+
+        async def submit_bracket(self, setup, qty):
+            if self.raise_on_submit:
+                raise RuntimeError("exchange down")
+            return await super().submit_bracket(setup, qty)
+
+    broker = RaisingSubmitBroker(equity=Decimal("100000"))
+    reporter = FakeReporter()
+    approver = FakeApprover(decision="APPROVE")
+    o = _make_orch(broker, approver=approver, reporter=reporter)
+    o.start_equity = Decimal("100000")
+    _or_set(o)
+    # Must not raise
+    await o._react(SetupProposed(setup=_setup_long()))
+    assert reporter.trade_taken_calls == [], "trade_taken must NOT be called on submit failure"
+    assert o._last_model is None, "_last_model must remain None on submit failure"
+
+
+async def test_react_get_account_failure_is_graceful():
+    # Fix B: if get_account raises, _on_setup_proposed must return gracefully —
+    # no submit, no approver call, no crash.
+    class RaisingAccountBroker(FakeBroker):
+        async def get_account(self):
+            raise OSError("network timeout")
+
+    broker = RaisingAccountBroker(equity=Decimal("100000"))
+    approver = FakeApprover(decision="APPROVE")
+    o = _make_orch(broker, approver=approver)
+    o.start_equity = Decimal("100000")
+    _or_set(o)
+    # Must not raise
+    await o._react(SetupProposed(setup=_setup_long()))
+    assert broker.submitted == [], "submit_bracket must not be called when get_account fails"
+    assert approver.requests == [], "approver must not be called when get_account fails"
+
+
+async def test_react_unexpected_decision_does_not_submit():
+    # Fix D gate: an approver returning an unrecognized string (e.g. "MAYBE") must
+    # NOT result in a bracket submission — the strict `decision != "APPROVE"` gate holds.
+    broker = FakeBroker(equity=Decimal("100000"))
+    approver = FakeApprover(decision="MAYBE")
+    o = _make_orch(broker, approver=approver)
+    o.start_equity = Decimal("100000")
+    _or_set(o)
+    await o._react(SetupProposed(setup=_setup_long()))
+    assert broker.submitted == [], "unexpected decision must not result in bracket submission"

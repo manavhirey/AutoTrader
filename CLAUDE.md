@@ -166,7 +166,18 @@ write-ups live in the `.superpowers/sdd/progress.md` roll-up. (Beyond this list,
   attribute-sniffs `engine.ctx.atr.value`; a rename would silently make `tol=0` (toothless stale-price gate). Add an
   `Engine.current_atr -> Decimal | None` accessor and call it. *(Found: T39 review; pragmatic today, real engine always has ctx.)*
 
+- [ ] **[HIGH] Reconcile an AMBIGUOUS `submit_bracket` failure (orchestrator `_react`).** `_react` now logs+returns on a
+  submit exception (no false trade_taken, and the engine's WAIT_ENTRY window guard expires the un-filled setup), but if
+  the request actually reached Alpaca and only the RESPONSE failed, a **real resting bracket is left untracked**. Before
+  live: on a submit exception, look the ENTRY order up by its deterministic `client_order_id` (via the same
+  `get_order_by_client_id` primitive the CRITICAL reconciliation item needs) to decide adopt-vs-cancel. *(Found: T40 security review.)*
+
 ### Resolved-during-build findings log (audit trail; fixed in the named commit)
+- [x] **[T40 _react robustness] approval→submit money-path hardening.** Review verified the path is correct (reject-before-
+  approval ordering, mode-uniform approver call, single `on_approval`, strict `== "APPROVE"` submit gate, no secret logging).
+  Fixed: `submit_bracket` and `get_account` wrapped in try/except (log `type(exc).__name__` only, fail safe — no false
+  trade_taken); `_react` typed `EngineEvent` + terminal `unhandled_engine_event` warning; clarifying comments; +submit-failure /
+  account-failure / unexpected-decision tests. Closed the T39 SHORT `shorting_enabled` gate here too. Fixed in T40 commit.
 - [x] **[T39 sizing] buying-power cap + coverage.** Core risk-sizing math verified correct (floor, reject<1, LONG/SHORT
   revalidate symmetry). Added a buying-power cap (`qty = min(risk_qty, floor(buying_power/entry))`) so a wide-stop/large-equity
   size can't exceed buying power → silent Alpaca rejection; zero-equity now logs; +SHORT-sizing / SHORT-revalidate /

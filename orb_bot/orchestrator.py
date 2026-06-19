@@ -12,12 +12,22 @@ from orb_bot import logconf
 from orb_bot.aggregation import Aggregator
 from orb_bot.execution import alpaca as execution_alpaca
 from orb_bot.models import (
+    ApprovalRequest,
     Candle,
     Direction,
+    DirectionConfirmed,
+    EngineEvent,
+    EntryConfirmed,
     Fill,
     Model,
+    NoOp,
+    RangeDayDetected,
+    RangeEstablished,
     Setup,
+    SetupProposed,
+    TradeRecorded,
     TradeResult,
+    WindowExpired,
 )
 
 
@@ -213,3 +223,121 @@ class Orchestrator:
         if price < setup.target - tol:
             return False
         return True
+
+    def _build_approval_request(self, setup: Setup, qty: int) -> ApprovalRequest:
+        oran = self.engine.opening_range
+        stop_dist = abs(setup.entry - setup.stop)
+        risk_dollars = float(stop_dist * Decimal(qty))
+        data_warning = None
+        bars_present = getattr(oran, "bars_present", 0) if oran else 0
+        if oran is not None and getattr(oran, "low_confidence", False):
+            data_warning = f"iex_partial: bars_present={bars_present}"
+        return ApprovalRequest(
+            setup=setup,
+            symbol=self.symbol,
+            qty=qty,
+            risk_dollars=risk_dollars,
+            mode=self.mode,
+            feed=self.run.feed,
+            or_high=getattr(oran, "high", setup.entry) if oran else setup.entry,
+            or_low=getattr(oran, "low", setup.stop) if oran else setup.stop,
+            bars_present=bars_present,
+            data_warning=data_warning,
+            approval_ttl_s=self.cfg.approval_timeout_s,
+        )
+
+    async def _react(self, ev: EngineEvent) -> None:
+        if isinstance(ev, RangeEstablished):
+            self.log.info("state_transition", to="RANGE_SET")
+            return
+        if isinstance(ev, DirectionConfirmed):
+            self.log.info(
+                "state_transition",
+                to="WAIT_ENTRY",
+                direction=ev.direction.value,
+                break_level=str(ev.break_level),
+            )
+            return
+        if isinstance(ev, RangeDayDetected):
+            self.log.info("range_day_detected")
+            return
+        if isinstance(ev, (EntryConfirmed, NoOp)):
+            return
+        if isinstance(ev, WindowExpired):
+            self.log.info("window_expired")
+            return
+        if isinstance(ev, TradeRecorded):
+            self.log.info(
+                "trade_closed", pnl=str(ev.pnl), exit_reason=ev.exit_reason
+            )
+            return
+        if isinstance(ev, SetupProposed):
+            await self._on_setup_proposed(ev.setup)
+            return
+        else:
+            self.log.warning("unhandled_engine_event", event=type(ev).__name__)
+
+    async def _on_setup_proposed(self, setup: Setup) -> None:
+        equity = self._equity_for_sizing()
+        try:
+            acct = await self.broker.get_account()
+        except Exception as exc:  # noqa: BLE001
+            self.log.warning(
+                "setup_rejected", reason="account_fetch_failed", error=type(exc).__name__
+            )
+            return
+        qty = self._sizing(equity, setup, acct.buying_power)
+        if qty < 1:
+            self.log.info("setup_rejected", reason="risk too small for one whole share")
+            return
+        # Stale-price re-validation (§8 step 6 / §16): after sizing, BEFORE asking the
+        # approver, confirm the level is still reachable on the latest 1m price.
+        if not self._revalidate_setup(setup):
+            self.log.info("setup_rejected", reason="stale price: level no longer reachable")
+            return
+        # Gate SHORT setups on account's shorting_enabled flag.
+        if setup.direction is Direction.SHORT and not acct.shorting_enabled:
+            self.log.info("setup_rejected", reason="shorting not enabled on account")
+            return
+        req = self._build_approval_request(setup, qty)
+        self.log.info(
+            "setup_proposed",
+            direction=setup.direction.value,
+            model=setup.model.value,
+            entry=str(setup.entry),
+            stop=str(setup.stop),
+            target=str(setup.target),
+            qty=qty,
+        )
+        decision = await self.approver.request(req)
+        self.log.info("approval", decision=decision, approver=self.mode)
+        # The returned event list is intentionally NOT re-dispatched — the real
+        # entry/IN_TRADE transition and slot consumption happen later via
+        # on_entry_filled on the actual fill (spec §8 step 8), not off EntryConfirmed;
+        # re-dispatching would double-fire.
+        self.engine.on_approval(decision)
+        if decision != "APPROVE":
+            return
+        try:
+            res = await self.broker.submit_bracket(setup, qty)
+        except Exception as exc:  # noqa: BLE001
+            # Log only the exception type — never str/repr (SDK exceptions may echo
+            # request or auth material). On failure, do NOT set _last_model and do NOT
+            # call reporter.trade_taken; the engine's WAIT_ENTRY window guard will
+            # expire the un-filled setup naturally.
+            # BACKLOG: a fully-robust handler would reconcile whether the bracket
+            # actually landed via get_order_by_client_id (deterministic client_order_id
+            # lookup) — that broker primitive is a CRITICAL backlog item (Task 41+).
+            self.log.error("order_submit_failed", error=type(exc).__name__)
+            return
+        # Record the submitted setup's model so the eventual TradeResult is
+        # attributed correctly (MED #11). Set on each successful submit; remains
+        # until the next successful submit (P/L-attribution consumer lands in Task 41).
+        self._last_model = setup.model
+        self.log.info(
+            "order_submitted",
+            order_id=res.order_id,
+            client_order_id=res.client_order_id,
+            qty=qty,
+        )
+        await self.reporter.trade_taken(setup, qty, self.mode)
