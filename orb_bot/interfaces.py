@@ -26,6 +26,9 @@ from orb_bot.models import (
 class DataFeed(Protocol):
     """Yields 1m transport candles; the orchestrator aggregates 1m -> T."""
 
+    def start(self) -> None:
+        ...  # SYNC: subscribes bars + schedules the ws task on the running loop
+
     def candles(self) -> AsyncIterator[Candle]:
         ...
 
@@ -35,6 +38,12 @@ class DataFeed(Protocol):
 
 @runtime_checkable
 class Broker(Protocol):
+    async def start_stream(self) -> None:
+        ...  # subscribes trade updates + schedules the ws task
+
+    async def stop_stream(self) -> None:
+        ...
+
     async def get_account(self) -> AccountSnapshot:
         ...
 

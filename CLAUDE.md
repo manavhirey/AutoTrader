@@ -196,6 +196,15 @@ write-ups live in the `.superpowers/sdd/progress.md` roll-up. (Beyond this list,
   `get_order_by_client_id` primitive the CRITICAL reconciliation item needs) to decide adopt-vs-cancel. *(Found: T40 security review.)*
 
 ### Resolved-during-build findings log (audit trail; fixed in the named commit)
+- [x] **[FINAL whole-branch review] SHOWSTOPPER: transports were never started — now fixed.** The Orchestrator never
+  called `feed.start()`, `broker.start_stream()`, or `DiscordClient.start_in_background()`, so in production (paper AND
+  live) the bot was inert: `feed.candles()` blocked forever (no bars), no fills ever arrived, and the live approval gate
+  stayed dead (every trade REJECTED). The per-task fakes (pre-seeded iterators / monkeypatched client) hid all three.
+  Fixed: added `start()` to the DataFeed Protocol + `start_stream()`/`stop_stream()` to the Broker Protocol; `run()` starts
+  the feed + broker streams before the drain task/candle loop (guarded by `_transports_started` so teardown only stops what
+  started); the shared DiscordClient is started/closed (idempotently) via the Discord approver+reporter `start()/close()`;
+  and `_emit_session_report` now stashes `engine.opening_range` on the reporter's client (fixes the always-LOW-CONFIDENCE
+  Discord embed — the long-deferred opening_range item). +transport-start integration tests. Fixed in the final-integration commit.
 - [x] **[T45 __main__ wiring] secret resolution + live-gate verified.** Review confirmed the security-critical parts are
   sound: SecretStr is resolved to plain str via `_reveal_str` and never reaches the Alpaca/Discord SDK; no secret is
   logged; the live-gate is two-layer (config model-validator + a wiring `RuntimeError`) so AutoApprover is provably

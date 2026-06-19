@@ -79,6 +79,9 @@ class Orchestrator:
         # once the wall clock passes flatten_at).
         self._flattened = False
         self._terminal_reason: str | None = None
+        # lifecycle flag: set to True after feed.start() + broker.start_stream()
+        # so _teardown only stops the broker stream if it was actually started.
+        self._transports_started = False
 
         run_id = f"{self.clock.now().date().isoformat()}-{self.symbol}"
         self.log = logconf.configure_logging(
@@ -535,6 +538,13 @@ class Orchestrator:
     async def _emit_session_report(self) -> None:
         if self._reported:
             return
+        # Stash the engine's opening range onto the reporter's shared Discord
+        # client so DiscordReporter._range_meta reads a real bars_present instead
+        # of defaulting to 0/T LOW CONFIDENCE. Duck-typed: harmless for LogReporter
+        # (no _client) and when the range never formed (opening_range is None).
+        client = getattr(self.reporter, "_client", None)
+        if client is not None and self.engine.opening_range is not None:
+            client.opening_range = self.engine.opening_range
         summary_obj = await self._build_session_summary()
         self.log.info(
             "session_report",
@@ -619,6 +629,16 @@ class Orchestrator:
 
         await self.approver.start()
         await self.reporter.start()
+        # Start the live producers BEFORE draining fills / iterating candles.
+        # Without these starts the bot is inert in production: feed.candles()
+        # blocks forever (no bars enqueued) and trade_updates() never yields
+        # (no fills). feed.start() is SYNC: it subscribes bars and schedules the
+        # ws _run_forever() task on THIS running loop (safe — we are inside the
+        # coroutine, so asyncio.ensure_future has a loop). broker.start_stream()
+        # is async: it subscribes trade updates and schedules its own ws task.
+        self.feed.start()
+        await self.broker.start_stream()
+        self._transports_started = True
         updates_task = asyncio.create_task(self._drain_trade_updates())
 
         try:
@@ -679,6 +699,8 @@ class Orchestrator:
         # Emit the session report only if preflight captured start_equity (§15).
         if report and self.start_equity is not None:
             await self._emit_session_report()
+        if self._transports_started:
+            await self.broker.stop_stream()
         await self.feed.close()
         await self.approver.close()
         await self.reporter.close()

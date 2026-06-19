@@ -153,6 +153,30 @@ async def test_discordapprover_satisfies_protocol():
     assert isinstance(appr, Approver)
 
 
+async def test_start_and_close_drive_shared_client_lifecycle():
+    """DiscordApprover.start()/close() must drive the shared client's
+    start_in_background()/close() — without this the live gateway never connects
+    and every trade is REJECTED (is_ready False)."""
+
+    class _RecordingClient:
+        def __init__(self):
+            self.started = 0
+            self.closed = 0
+
+        async def start_in_background(self):
+            self.started += 1
+
+        async def close(self):
+            self.closed += 1
+
+    client = _RecordingClient()
+    appr = DiscordApprover(client, APPROVER_ID)
+    await appr.start()
+    assert client.started == 1
+    await appr.close()
+    assert client.closed == 1
+
+
 async def test_request_posts_embed_with_view_and_returns_decision():
     class _FakeChannel:
         def __init__(self):

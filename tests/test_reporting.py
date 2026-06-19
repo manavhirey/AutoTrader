@@ -438,6 +438,31 @@ async def test_discordreporter_session_report_embed_has_denominator_and_caveat()
 
 
 @pytest.mark.asyncio
+async def test_discordreporter_start_and_close_drive_shared_client_lifecycle():
+    """DiscordReporter.start()/close() must drive the shared client's
+    start_in_background()/close() (idempotent — in live mode the approver may
+    have already started the same client)."""
+
+    class _RecordingClient:
+        def __init__(self):
+            self.started = 0
+            self.closed = 0
+
+        async def start_in_background(self):
+            self.started += 1
+
+        async def close(self):
+            self.closed += 1
+
+    client = _RecordingClient()
+    r = DiscordReporter(client, timeframe_min=15)
+    await r.start()
+    assert client.started == 1
+    await r.close()
+    assert client.closed == 1
+
+
+@pytest.mark.asyncio
 async def test_discordreporter_trade_taken_sends_embed():
     client = _FakeDiscordClient()
     r = DiscordReporter(client, timeframe_min=15)

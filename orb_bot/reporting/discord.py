@@ -98,7 +98,11 @@ class DiscordReporter:
         self._timeframe_min = timeframe_min
 
     async def start(self) -> None:
-        return None
+        # Start the shared Discord gateway. Idempotent via the client's
+        # double-start guard: in live mode the approver already started the same
+        # shared client, so this no-ops; in paper-with-Discord-reporter the
+        # reporter is the one that brings the gateway up.
+        await self._client.start_in_background()
 
     async def trade_taken(self, setup: models.Setup, qty: int, mode: str) -> None:
         embed = discord.Embed(
@@ -140,4 +144,6 @@ class DiscordReporter:
         return (rng.bars_present, rng.low_confidence)
 
     async def close(self) -> None:
-        return None
+        # Idempotent close of the shared client (no-op if the approver already
+        # closed it).
+        await self._client.close()

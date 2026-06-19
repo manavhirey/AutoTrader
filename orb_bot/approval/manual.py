@@ -95,8 +95,11 @@ class DiscordApprover:
         self._approver_user_id = int(approver_user_id)
 
     async def start(self) -> None:
-        # The shared DiscordClient is started by the orchestrator; nothing to do here.
-        return None
+        # Start the shared Discord gateway (idempotent: start_in_background has a
+        # double-start guard, so if the reporter shares this client only one ws
+        # connection is made). Without this the live approval gate is dead and
+        # every trade is REJECTED (is_ready False -> fail-closed).
+        await self._client.start_in_background()
 
     async def request(self, req: ApprovalRequest) -> str:
         # Fail closed: if the gateway is not ready, reject without sending.
@@ -131,4 +134,5 @@ class DiscordApprover:
         return decision
 
     async def close(self) -> None:
-        return None
+        # Idempotent close of the shared client (no-op if already closed).
+        await self._client.close()

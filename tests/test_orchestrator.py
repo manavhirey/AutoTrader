@@ -57,6 +57,10 @@ class FakeFeed:
         self._hist = hist or []
         self.hist_calls = []
         self.closed = False
+        self.started = False
+
+    def start(self):
+        self.started = True
 
     async def candles(self):
         for c in self._candles:
@@ -95,6 +99,14 @@ class FakeBroker:
         self.flatten_calls = 0
         self._fills = []
         self.cancel_raises = cancel_raises
+        self.stream_started = False
+        self.stream_stopped = False
+
+    async def start_stream(self):
+        self.stream_started = True
+
+    async def stop_stream(self):
+        self.stream_stopped = True
 
     async def get_account(self):
         return AccountSnapshot(
@@ -1113,9 +1125,15 @@ async def test_run_paper_full_cycle_submits_and_reports():
     _or_set(o)
     await o.run()
     assert approver.started and reporter.started
+    # Transport-start wiring (SHOWSTOPPER fix): the orchestrator MUST start the
+    # feed + broker streams, else the bot is inert in production.
+    assert feed.started is True, "feed.start() must be called in run()"
+    assert broker.stream_started is True, "broker.start_stream() must be called in run()"
     assert len(broker.submitted) == 1
     assert len(reporter.session_reports) == 1
     assert feed.closed and approver.closed and reporter.closed
+    # And the broker stream must be stopped on teardown.
+    assert broker.stream_stopped is True, "broker.stop_stream() must be called in teardown"
 
 
 async def test_run_market_closed_skips_loop_but_reports_with_start_equity():
@@ -1130,6 +1148,21 @@ async def test_run_market_closed_skips_loop_but_reports_with_start_equity():
     # market closed → no submit; session_report not emitted (no start_equity captured)
     assert broker.submitted == []
     assert reporter.session_reports == []
+
+
+async def test_run_market_closed_does_not_start_transports():
+    # Robustness fix: on market-closed preflight fail path, _teardown must NOT call
+    # broker.stop_stream() since it was never started. Assert stream_started=False and
+    # stream_stopped=False (stop not called because never started).
+    feed = FakeFeed([])
+    broker = FakeBroker(is_open=False)
+    clk = FixedClock(datetime.datetime(2026, 6, 19, 9, 20, tzinfo=ET))
+    o = orch_mod.Orchestrator(
+        _settings(), feed, broker, FakeApprover(), FakeReporter(), clk, FakeEngine()
+    )
+    await o.run()
+    assert broker.stream_started is False, "transports should not be started on market closed"
+    assert broker.stream_stopped is False, "stop_stream should not be called if never started"
 
 
 async def test_run_boundary_timer_force_closes_missing_minute_bucket():
@@ -1319,3 +1352,28 @@ async def test_run_boundary_force_closes_edge_aligned_last_minute_bar():
     await o.run()
     # force_close emitted the partial 09:30 T-candle the engine received.
     assert len(engine.candles) >= 1, "edge-aligned last-minute bar must trigger force_close"
+
+
+async def test_run_normal_full_cycle_starts_and_stops_transports():
+    # Robustness fix verification: on normal full-cycle run, broker.stream_started=True
+    # and broker.stream_stopped=True (transports properly lifecycle'd).
+    one_min = []
+    base = datetime.datetime(2026, 6, 19, 9, 30, tzinfo=ET)
+    for i in range(31):
+        ts = base + datetime.timedelta(minutes=i)
+        one_min.append(
+            Candle(ts_open=ts, ts_close=ts + datetime.timedelta(minutes=1),
+                   open=Decimal("100"), high=Decimal("101"), low=Decimal("99"),
+                   close=Decimal("100"), volume=5, timeframe_min=1)
+        )
+    feed = FakeFeed(one_min)
+    broker = FakeBroker(equity=Decimal("100000"))
+    engine = FakeEngine(events_by_index={1: [SetupProposed(setup=_setup_long())]})
+    clk = FixedClock(datetime.datetime(2026, 6, 19, 9, 20, tzinfo=ET))
+    o = orch_mod.Orchestrator(
+        _settings(), feed, broker, FakeApprover(decision="APPROVE"), FakeReporter(), clk, engine
+    )
+    _or_set(o)
+    await o.run()
+    assert broker.stream_started is True, "transports should be started on normal run"
+    assert broker.stream_stopped is True, "transports should be stopped on normal shutdown"

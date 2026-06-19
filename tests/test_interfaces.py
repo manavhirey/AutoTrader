@@ -34,6 +34,9 @@ def test_is_runtime_checkable(proto):
 
 def test_datafeed_stub_satisfies_isinstance():
     class StubFeed:
+        def start(self) -> None:
+            ...
+
         def candles(self) -> AsyncIterator:  # type: ignore[type-arg]
             ...
 
@@ -54,6 +57,12 @@ def test_datafeed_missing_method_fails_isinstance():
 
 def test_broker_stub_satisfies_isinstance():
     class StubBroker:
+        async def start_stream(self) -> None:
+            ...
+
+        async def stop_stream(self) -> None:
+            ...
+
         async def get_account(self):
             ...
 
