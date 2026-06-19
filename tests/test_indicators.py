@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from orb_bot.indicators import ATR, is_strong_close, within
+from orb_bot.indicators import ATR, find_swing, is_strong_close, within
 from orb_bot.models import Candle, Direction
 
 ET = ZoneInfo("America/New_York")
@@ -157,3 +157,87 @@ def test_within_zero_tol():
     assert within(c, Decimal("100"), Decimal("0")) is True
     c2 = _candle("99.9", "99.99", "99.8", "99.95")  # high<level, low<level
     assert within(c2, Decimal("100"), Decimal("0")) is False
+
+
+# ---------------------------------------------------------------------------
+# find_swing tests
+# ---------------------------------------------------------------------------
+
+
+def _hilo(h, lo, *, minute):
+    # build a candle with given high/low; open/close inside range
+    mid = (Decimal(str(h)) + Decimal(str(lo))) / 2
+    return Candle(
+        ts_open=datetime(2026, 6, 19, 9, 30 + minute, tzinfo=ET),
+        ts_close=datetime(2026, 6, 19, 9, 31 + minute, tzinfo=ET),
+        open=mid,
+        high=Decimal(str(h)),
+        low=Decimal(str(lo)),
+        close=mid,
+        volume=10,
+        timeframe_min=15,
+    )
+
+
+def test_find_swing_high_single_pivot():
+    # highs:      5   7   9   6   4   (idx2=9 is the only fractal high for k=1)
+    bars = [
+        _hilo(5, 1, minute=0),
+        _hilo(7, 2, minute=1),
+        _hilo(9, 3, minute=2),
+        _hilo(6, 2, minute=3),
+        _hilo(4, 1, minute=4),
+    ]
+    assert find_swing(bars, k=1, lookback=5, kind="high") == Decimal("9")
+
+
+def test_find_swing_low_single_pivot():
+    # lows:       9   6   3   5   8   (idx2=3 is fractal low)
+    bars = [
+        _hilo(20, 9, minute=0),
+        _hilo(18, 6, minute=1),
+        _hilo(15, 3, minute=2),
+        _hilo(17, 5, minute=3),
+        _hilo(19, 8, minute=4),
+    ]
+    assert find_swing(bars, k=1, lookback=5, kind="low") == Decimal("3")
+
+
+def test_find_swing_returns_most_recent_pivot():
+    # two fractal highs: idx1 (8) and idx3 (10); most recent = 10
+    bars = [
+        _hilo(5, 1, minute=0),
+        _hilo(8, 2, minute=1),   # pivot high (5<8>6)
+        _hilo(6, 2, minute=2),
+        _hilo(10, 3, minute=3),  # pivot high (6<10>7)
+        _hilo(7, 2, minute=4),
+    ]
+    assert find_swing(bars, k=1, lookback=5, kind="high") == Decimal("10")
+
+
+def test_find_swing_none_monotonic():
+    # strictly increasing highs -> no fractal high exists (each side never lower on both)
+    bars = [_hilo(h, h - 4, minute=h) for h in (5, 6, 7, 8, 9)]
+    assert find_swing(bars, k=1, lookback=5, kind="high") is None
+
+
+def test_find_swing_none_too_few_bars():
+    # need 2k+1 = 3 bars; give 2 -> None
+    bars = [_hilo(5, 1, minute=0), _hilo(6, 2, minute=1)]
+    assert find_swing(bars, k=1, lookback=5, kind="high") is None
+
+
+def test_find_swing_respects_lookback_slice():
+    # an old pivot outside the lookback slice must be ignored.
+    # 7 bars; lookback=4 -> only last 4 considered: highs [6,10,7,4]
+    #   within slice idx1(10) is a pivot (6<10>7) -> returns 10.
+    bars = [
+        _hilo(20, 1, minute=0),  # outside slice
+        _hilo(5, 1, minute=1),   # outside slice
+        _hilo(99, 1, minute=2),  # outside slice (would be a huge pivot if seen)
+        _hilo(6, 1, minute=3),   # slice start
+        _hilo(10, 1, minute=4),  # pivot in slice
+        _hilo(7, 1, minute=5),
+        _hilo(4, 1, minute=6),
+    ]
+    assert find_swing(bars, k=1, lookback=4, kind="high") == Decimal("10")

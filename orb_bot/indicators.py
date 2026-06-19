@@ -99,3 +99,33 @@ def is_strong_close(
 def within(c: Candle, level: Decimal, tol: Decimal) -> bool:
     """Spec §12: candle range touches the [level-tol, level+tol] band (inclusive)."""
     return c.low <= level + tol and c.high >= level - tol
+
+
+def find_swing(
+    candles: list[Candle], k: int, lookback: int, kind: str
+) -> Decimal | None:
+    """Most-recent fractal pivot over the last `lookback` candles (§10 #12).
+
+    pivot-high at i: high[i] strictly greater than high of each of the k bars on
+    each side. pivot-low at i: low[i] strictly less than the k bars each side.
+    Returns the pivot value (high/low) of the most recent qualifying index, else None.
+    """
+    if kind not in ("high", "low"):
+        raise ValueError(f"kind must be 'high' or 'low', got {kind!r}")
+    if k < 1 or lookback < 1:
+        return None
+    window = candles[-lookback:]
+    n = len(window)
+    if n < 2 * k + 1:
+        return None
+    # scan newest-eligible first so we return the most recent pivot
+    for i in range(n - 1 - k, k - 1, -1):
+        if kind == "high":
+            pivot = window[i].high
+            ok = all(window[i + d].high < pivot for d in range(-k, k + 1) if d != 0)
+        else:
+            pivot = window[i].low
+            ok = all(window[i + d].low > pivot for d in range(-k, k + 1) if d != 0)
+        if ok:
+            return pivot
+    return None
