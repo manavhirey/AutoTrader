@@ -76,6 +76,22 @@ write-ups live in the `.superpowers/sdd/progress.md` roll-up. (Beyond this list,
 - [ ] **[MED] Market-closed preflight leaves `start_equity=None` — caller must early-exit (run loop Task 44 / report Task 43).**
   `_preflight()` returns False on a closed market without setting `start_equity`; the run loop must not proceed to any
   equity use, and the session-report path must guard `start_equity is None`. *(Found: T38 security review.)*
+- [ ] **[HIGH] Cumulative-vs-increment `qty` contract mismatch on partial fills (execution ↔ orchestrator).** Task 29's
+  `_on_trade_update` sets `Fill.qty = int(order.filled_qty)` — Alpaca's `filled_qty` is the order's **cumulative** total,
+  but `_on_fill`/`summary` **sum** `f.qty` across fills assuming each is the per-fill **increment**. So two partials of 6
+  then 10(cum) get summed to 16 shares and mis-weight the average price → corrupted reported P&L/qty on ANY partially-filled
+  trade (reporting-only; the submitted bracket qty is still correct). Pick ONE convention end-to-end: emit the delta in the
+  adapter (track prev cumulative per order) OR use last-cumulative in the builder. Add a partial-fill integration test.
+  *(Found: T41 review.)*
+- [ ] **[HIGH] EOD reconciliation for a partial close that never reaches `position_qty==0` (orchestrator, Task 42/43).**
+  If an exit only partially closes and the position is then flattened/EOD'd without a final `position_qty==0` fill, the
+  accumulated `_exit_fills` never build a TradeResult → the trade is **silently lost from the session P&L**. Add an
+  end-of-session step that, if `entry_fill` is still set with exit fills accumulated, forces a TradeResult build (same
+  4-field reset). *(Found: T41 security review.)*
+- [ ] **[MED] Adopted/reconciled trade is mis-attributed to `BREAKOUT`.** `_build_trade_result` defaults `model` to
+  BREAKOUT when `_last_model` is None — true for a restart-adopted position (no `_react` ran). Attribute adopted trades
+  with an explicit RECONCILED/UNKNOWN model (or recover the original) so session stats aren't skewed. *(Found: T41 review;
+  part of the reconciliation feature.)*
 - [ ] **[HIGH] Quantize `Setup` stop/target to `tick_size` (engine, pure core).** `engine.py:160`
   `_buffer()` = `max(stop_buffer_ticks*tick, stop_buffer_atr*ATR)`; the ATR term is **not** rounded
   to `tick_size`, so stop/target can be sub-penny. `submit_bracket` forwards them verbatim and
@@ -173,6 +189,12 @@ write-ups live in the `.superpowers/sdd/progress.md` roll-up. (Beyond this list,
   `get_order_by_client_id` primitive the CRITICAL reconciliation item needs) to decide adopt-vs-cancel. *(Found: T40 security review.)*
 
 ### Resolved-during-build findings log (audit trail; fixed in the named commit)
+- [x] **[T41 fill tracking] P&L core: fixed 2 brief bugs + 3 review-criticals.** The brief's full-fill detection
+  (`position_qty==fill.qty`) and build-on-every-exit were wrong; reimplemented as intended-qty tracking + build-only-on-
+  `position_qty==0` (share-weighted partial exits). Then review-fixes: SHORT entries (negative `position_qty`) now detected
+  via `abs(position_qty) >= pending` (was a CRITICAL — bot was blind to its own shorts); entry idempotency (reset pending→0,
+  no double slot-decrement); adopted-position close no longer crashes on empty `_entry_fills` (seeded in preflight + guard);
+  exit-with-no-open-trade now logs. +SHORT/overshoot/duplicate/adopted tests. Fixed in T41 commit.
 - [x] **[T40 _react robustness] approval→submit money-path hardening.** Review verified the path is correct (reject-before-
   approval ordering, mode-uniform approver call, single `on_approval`, strict `== "APPROVE"` submit gate, no secret logging).
   Fixed: `submit_bracket` and `get_account` wrapped in try/except (log `type(exc).__name__` only, fail safe — no false

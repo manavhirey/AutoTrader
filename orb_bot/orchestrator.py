@@ -21,6 +21,7 @@ from orb_bot.models import (
     Fill,
     Model,
     NoOp,
+    OrderResult,
     RangeDayDetected,
     RangeEstablished,
     Setup,
@@ -29,6 +30,7 @@ from orb_bot.models import (
     TradeResult,
     WindowExpired,
 )
+from orb_bot.reporting import summary
 
 
 class Orchestrator:
@@ -64,6 +66,7 @@ class Orchestrator:
         self.entry_fill: Fill | None = None
         self._entry_fills: list[Fill] = []
         self._exit_fills: list[Fill] = []
+        self._pending_entry_qty: int = 0
         self.flatten_coid: str | None = None
         self.trade_seq: int = 1
         self._stop = asyncio.Event()
@@ -155,6 +158,11 @@ class Orchestrator:
             self.engine.adopt_open_position(int(position_qty), entry_fill)
             self.reconciled_open_position = True
             self.entry_fill = entry_fill
+            # Seed _entry_fills so the eventual close has an entry leg to
+            # weight against; leave _pending_entry_qty=0 (entry already happened
+            # pre-restart; no ENTRY fill will arrive through _on_fill).
+            if entry_fill is not None:
+                self._entry_fills = [entry_fill]
             self.log.warning(
                 "preflight_reconcile_open_position",
                 position_qty=position_qty,
@@ -334,6 +342,7 @@ class Orchestrator:
         # attributed correctly (MED #11). Set on each successful submit; remains
         # until the next successful submit (P/L-attribution consumer lands in Task 41).
         self._last_model = setup.model
+        self._pending_entry_qty = qty
         self.log.info(
             "order_submitted",
             order_id=res.order_id,
@@ -341,3 +350,119 @@ class Orchestrator:
             qty=qty,
         )
         await self.reporter.trade_taken(setup, qty, self.mode)
+
+    def _build_trade_result(
+        self, entry_fills: list[Fill], exit_fills: list[Fill], exit_reason: str
+    ) -> TradeResult:
+        """Delegate to the pure builder (spec §17a): share-weighted entry/exit
+        prices over partial fills, qty = min(entry, exit), pnl_pct as a fraction."""
+        direction = (
+            Direction.LONG if entry_fills[0].side.lower() == "buy" else Direction.SHORT
+        )
+        model = self._last_model if self._last_model is not None else Model.BREAKOUT
+        start_equity = self.start_equity if self.start_equity else Decimal("1")
+        return summary.build_trade_result(
+            entry_fills,
+            exit_fills,
+            direction,
+            model,
+            start_equity,
+            exit_reason,
+        )
+
+    async def _on_fill(self, fill: Fill) -> None:
+        self.log.info(
+            "fill",
+            leg_role=fill.leg_role,
+            side=fill.side,
+            price=str(fill.price),
+            qty=fill.qty,
+            position_qty=fill.position_qty,
+        )
+        if fill.leg_role == "ENTRY":
+            # Accumulate entry partial fills; only flip to IN_TRADE on a TRUE full
+            # fill (abs(position_qty) >= intended entry qty). A partial entry must
+            # NOT be treated as full (MED #13). Use abs() so SHORT entries
+            # (position_qty < 0) are correctly detected; >= handles overshoot.
+            self._entry_fills.append(fill)
+            if self._pending_entry_qty > 0 and abs(fill.position_qty) >= self._pending_entry_qty:
+                self.entry_fill = fill  # representative full-fill marker
+                self._pending_entry_qty = 0  # idempotency: prevent duplicate on_entry_filled
+                res = OrderResult(
+                    order_id=fill.order_id,
+                    client_order_id=fill.client_order_id,
+                    status="filled",
+                    filled_avg_price=summary.weighted_avg_price(self._entry_fills),
+                    filled_qty=sum(f.qty for f in self._entry_fills),
+                    legs=[],
+                )
+                self.engine.on_entry_filled(res)
+            return
+
+        if fill.leg_role in ("TP", "SL"):
+            if self.entry_fill is None:
+                self.log.warning(
+                    "exit_fill_no_open_trade",
+                    leg_role=fill.leg_role,
+                    position_qty=fill.position_qty,
+                )
+                return
+            if not self._entry_fills:
+                self.log.warning(
+                    "exit_without_entry_fills",
+                    leg_role=fill.leg_role,
+                )
+                self.entry_fill = None
+                self._entry_fills = []
+                self._exit_fills = []
+                self._pending_entry_qty = 0
+                return
+            reason = fill.exit_reason or ("TARGET" if fill.leg_role == "TP" else "STOP")
+            self._exit_fills.append(fill)
+            # Only build TradeResult when position is fully closed (MED bug fix)
+            if fill.position_qty == 0:
+                self.trades.append(
+                    self._build_trade_result(
+                        list(self._entry_fills), list(self._exit_fills), reason
+                    )
+                )
+                self.engine.on_trade_closed(fill)
+                self.entry_fill = None
+                self._entry_fills = []
+                self._exit_fills = []
+                self._pending_entry_qty = 0
+            return
+
+        if fill.leg_role == "FLATTEN":
+            # Orchestrator synthesizes the FLATTEN TradeResult directly (§8 step 9);
+            # the OCO legs were cancelled so the engine never sees this close.
+            if self.entry_fill is None:
+                self.log.warning(
+                    "exit_fill_no_open_trade",
+                    leg_role=fill.leg_role,
+                    position_qty=fill.position_qty,
+                )
+                return
+            if not self._entry_fills:
+                self.log.warning(
+                    "exit_without_entry_fills",
+                    leg_role=fill.leg_role,
+                )
+                self.entry_fill = None
+                self._entry_fills = []
+                self._exit_fills = []
+                self._pending_entry_qty = 0
+                return
+            self._exit_fills.append(fill)
+            # Only build TradeResult when position is fully closed
+            if fill.position_qty == 0:
+                self.trades.append(
+                    self._build_trade_result(
+                        list(self._entry_fills), list(self._exit_fills), "FLATTEN"
+                    )
+                )
+                self.entry_fill = None
+                self._entry_fills = []
+                self._exit_fills = []
+                self._pending_entry_qty = 0
+            return

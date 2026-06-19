@@ -14,6 +14,7 @@ from orb_bot.models import (
     Candle,
     ClockInfo,
     Direction,
+    Fill,
     Model,
     OrderResult,
     Setup,
@@ -744,3 +745,182 @@ async def test_react_unexpected_decision_does_not_submit():
     _or_set(o)
     await o._react(SetupProposed(setup=_setup_long()))
     assert broker.submitted == [], "unexpected decision must not result in bracket submission"
+
+
+# ---------------------------------------------------------------------------
+# Task 41: fill tracking (_on_fill)
+# ---------------------------------------------------------------------------
+
+
+def _fill(leg_role, side, price, qty, position_qty, exit_reason=None, coid="2026-06-19-AAPL-1"):
+    return Fill(
+        order_id="o-" + leg_role,
+        client_order_id=f"{coid}-{leg_role}",
+        leg_role=leg_role,
+        side=side,
+        price=Decimal(str(price)),
+        qty=qty,
+        ts=datetime.datetime(2026, 6, 19, 10, 0, tzinfo=ET),
+        position_qty=position_qty,
+        exit_reason=exit_reason,
+    )
+
+
+async def test_entry_fill_routes_to_engine_on_entry_filled():
+    broker = FakeBroker()
+    o = _make_orch(broker)
+    o.start_equity = Decimal("100000")
+    o._pending_entry_qty = 10
+    await o._on_fill(_fill("ENTRY", "buy", 100.00, 10, position_qty=10))
+    assert len(o.engine.entry_fills) == 1
+    assert o.entry_fill is not None
+    assert o.entry_fill.qty == 10
+
+
+async def test_partial_entry_fill_not_yet_in_trade():
+    # MED #13: a partial entry fill (position_qty < cumulative qty) must NOT flip
+    # to IN_TRADE / notify the engine.
+    broker = FakeBroker()
+    o = _make_orch(broker)
+    o.start_equity = Decimal("100000")
+    o._pending_entry_qty = 10
+    await o._on_fill(_fill("ENTRY", "buy", 100.00, 4, position_qty=4))  # fill 4 of 10
+    assert o.engine.entry_fills == []   # not yet full -> engine not told
+    assert o.entry_fill is None
+    # second partial completes the position
+    await o._on_fill(_fill("ENTRY", "buy", 100.50, 6, position_qty=10))
+    assert len(o.engine.entry_fills) == 1
+    assert o.entry_fill is not None
+
+
+async def test_partial_exit_fills_share_weighted_exit_price():
+    # HIGH #5: two partial TP fills average share-weighted via the pure builder.
+    broker = FakeBroker()
+    o = _make_orch(broker)
+    o.start_equity = Decimal("100000")
+    o._pending_entry_qty = 10
+    await o._on_fill(_fill("ENTRY", "buy", 100.00, 10, position_qty=10))
+    await o._on_fill(_fill("TP", "sell", 102.00, 6, position_qty=4, exit_reason="TARGET"))
+    await o._on_fill(_fill("TP", "sell", 103.00, 4, position_qty=0, exit_reason="TARGET"))
+    assert len(o.trades) == 1
+    tr = o.trades[0]
+    # (102*6 + 103*4)/10 = 102.40 share-weighted exit
+    assert tr.exit_price == Decimal("102.40")
+    assert tr.qty == 10
+    assert tr.pnl == Decimal("24.00")  # (102.40-100)*10
+
+
+async def test_target_exit_builds_trade_result_and_records():
+    broker = FakeBroker()
+    o = _make_orch(broker)
+    o.start_equity = Decimal("100000")
+    o._pending_entry_qty = 10
+    await o._on_fill(_fill("ENTRY", "buy", 100.00, 10, position_qty=10))
+    await o._on_fill(
+        _fill("TP", "sell", 102.00, 10, position_qty=0, exit_reason="TARGET")
+    )
+    assert len(o.engine.closed_fills) == 1
+    assert len(o.trades) == 1
+    tr = o.trades[0]
+    assert tr.exit_reason == "TARGET"
+    assert tr.entry_price == Decimal("100.00")
+    assert tr.exit_price == Decimal("102.00")
+    assert tr.qty == 10
+    assert tr.pnl == Decimal("20.00")  # (102-100)*10 LONG
+    assert tr.pnl_pct == Decimal("20.00") / Decimal("100000")
+
+
+async def test_stop_exit_long_negative_pnl():
+    broker = FakeBroker()
+    o = _make_orch(broker)
+    o.start_equity = Decimal("100000")
+    o._pending_entry_qty = 10
+    await o._on_fill(_fill("ENTRY", "buy", 100.00, 10, position_qty=10))
+    await o._on_fill(
+        _fill("SL", "sell", 99.00, 10, position_qty=0, exit_reason="STOP")
+    )
+    assert o.trades[0].pnl == Decimal("-10.00")
+    assert o.trades[0].exit_reason == "STOP"
+
+
+async def test_flatten_fill_synthesizes_trade_result():
+    broker = FakeBroker()
+    o = _make_orch(broker)
+    o.start_equity = Decimal("100000")
+    o._pending_entry_qty = 10
+    o.flatten_coid = "2026-06-19-AAPL-1-FLATTEN"
+    await o._on_fill(_fill("ENTRY", "buy", 100.00, 10, position_qty=10))
+    await o._on_fill(
+        _fill("FLATTEN", "sell", 100.50, 10, position_qty=0, exit_reason="FLATTEN")
+    )
+    assert len(o.trades) == 1
+    tr = o.trades[0]
+    assert tr.exit_reason == "FLATTEN"
+    assert tr.pnl == Decimal("5.00")  # (100.50-100)*10
+    # FLATTEN is synthesized by orchestrator, NOT via engine.on_trade_closed
+    assert o.engine.closed_fills == []
+
+
+# ---------------------------------------------------------------------------
+# Task 41 review fixes: SHORT detection, overshoot, idempotency, adopted close
+# ---------------------------------------------------------------------------
+
+
+async def test_short_entry_and_exit_produces_correct_trade_result():
+    """Fix A+: SHORT entry fill has negative position_qty; exit is a buy.
+    Winning short: entry 100, exit 98, qty 10 → pnl = (100-98)*10 = +20."""
+    broker = FakeBroker()
+    o = _make_orch(broker)
+    o.start_equity = Decimal("100000")
+    o._pending_entry_qty = 10
+    # ENTRY fill for a short: side='sell', position_qty=-10 (Alpaca signed)
+    await o._on_fill(_fill("ENTRY", "sell", 100, 10, position_qty=-10))
+    assert len(o.engine.entry_fills) == 1, "on_entry_filled must fire for short"
+    assert o.entry_fill is not None
+    # SL fill closes the short (buy to cover): position_qty=0
+    await o._on_fill(_fill("SL", "buy", 98, 10, position_qty=0, exit_reason="STOP"))
+    assert len(o.trades) == 1
+    tr = o.trades[0]
+    assert tr.direction is Direction.SHORT
+    assert tr.pnl == Decimal("20.00")  # winning short: (100-98)*10
+
+
+async def test_overshoot_entry_fill_treated_as_full():
+    """Fix A: abs(position_qty)=12 >= pending=10 → full fill fires on_entry_filled."""
+    broker = FakeBroker()
+    o = _make_orch(broker)
+    o.start_equity = Decimal("100000")
+    o._pending_entry_qty = 10
+    await o._on_fill(_fill("ENTRY", "buy", 100, 12, position_qty=12))
+    assert len(o.engine.entry_fills) == 1
+    assert o.entry_fill is not None
+
+
+async def test_duplicate_entry_full_fill_fires_engine_only_once():
+    """Fix B: idempotency — two identical ENTRY fills with position_qty=10 must
+    call engine.on_entry_filled exactly once (slot-decrement is inside the engine)."""
+    broker = FakeBroker()
+    o = _make_orch(broker)
+    o.start_equity = Decimal("100000")
+    o._pending_entry_qty = 10
+    await o._on_fill(_fill("ENTRY", "buy", 100, 10, position_qty=10))
+    await o._on_fill(_fill("ENTRY", "buy", 100, 10, position_qty=10))
+    assert len(o.engine.entry_fills) == 1, "duplicate ENTRY fill must not double-fire engine"
+
+
+async def test_adopted_close_builds_trade_result_without_crash():
+    """Fix C: simulate reconciliation — entry_fill and _entry_fills set directly
+    (as _preflight does), then an SL exit fires → TradeResult appended, no crash."""
+    broker = FakeBroker()
+    o = _make_orch(broker)
+    o.start_equity = Decimal("100000")
+    # Simulate what _preflight sets after a successful reconciliation
+    entry = _fill("ENTRY", "buy", 100, 10, position_qty=10)
+    o.entry_fill = entry
+    o._entry_fills = [entry]
+    # _pending_entry_qty stays 0 (entry already happened pre-restart)
+    # Drive an SL exit
+    await o._on_fill(_fill("SL", "sell", 99, 10, position_qty=0, exit_reason="STOP"))
+    assert len(o.trades) == 1
+    tr = o.trades[0]
+    assert tr.pnl == Decimal("-10.00")  # long loss: (99-100)*10
