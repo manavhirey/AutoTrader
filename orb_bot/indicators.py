@@ -146,3 +146,30 @@ def find_impulse(
     if not is_strong_close(c, direction, 0.60, 0.70):
         return None
     return Displacement(type="IMPULSE", upper_candle=c, lower_candle=c, size=rng)
+
+
+def find_fvg(
+    window: list[Candle], min_size_ticks: int, tick: Decimal
+) -> Displacement | None:
+    """§12: 3-candle fair-value-gap imbalance over the last three candles.
+
+    Bullish: c3.low > c1.high, gap >= min_size_ticks*tick ->
+        Displacement(FVG_BULL, lower_candle=c1, upper_candle=c3, size=gap).
+    Bearish: c1.low > c3.high, gap >= min_size_ticks*tick ->
+        Displacement(FVG_BEAR, upper_candle=c1, lower_candle=c3, size=gap).
+    """
+    if len(window) < 3:
+        return None
+    c1, _c2, c3 = window[-3], window[-2], window[-1]
+    min_size = Decimal(min_size_ticks) * tick
+    bull_gap = c3.low - c1.high
+    if bull_gap >= min_size and bull_gap > 0:
+        return Displacement(
+            type="FVG_BULL", upper_candle=c3, lower_candle=c1, size=bull_gap
+        )
+    bear_gap = c1.low - c3.high
+    if bear_gap >= min_size and bear_gap > 0:
+        return Displacement(
+            type="FVG_BEAR", upper_candle=c1, lower_candle=c3, size=bear_gap
+        )
+    return None

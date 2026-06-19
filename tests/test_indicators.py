@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from orb_bot.indicators import ATR, find_impulse, find_swing, is_strong_close, within
+from orb_bot.indicators import ATR, find_fvg, find_impulse, find_swing, is_strong_close, within
 from orb_bot.models import Candle, Direction
 
 ET = ZoneInfo("America/New_York")
@@ -283,3 +283,63 @@ def test_find_impulse_none_not_strong_close():
 
 def test_find_impulse_empty_window():
     assert find_impulse([], atr=Decimal("2"), mult=1.5) is None
+
+
+# ---------------------------------------------------------------------------
+# find_fvg tests
+# ---------------------------------------------------------------------------
+
+
+def test_find_fvg_bullish():
+    # c1.high=100, c3.low=100.05 -> gap=0.05 >= 0.02
+    win = [
+        _candle(98, 100, 97, "99.5"),    # c1
+        _candle(100, 103, 100, "102"),   # c2 (impulse middle)
+        _candle("100.10", 104, "100.05", "103"),  # c3 low=100.05 above c1.high
+    ]
+    disp = find_fvg(win, min_size_ticks=2, tick=Decimal("0.01"))
+    assert disp is not None
+    assert disp.type == "FVG_BULL"
+    assert disp.lower_candle is win[0]   # c1 -> stop uses lower_candle.low for LONG
+    assert disp.upper_candle is win[2]   # c3
+    assert disp.size == Decimal("0.05")
+
+
+def test_find_fvg_bearish():
+    # c1.low=100, c3.high=99.90 -> gap=0.10 (bearish imbalance)
+    win = [
+        _candle(102, 103, 100, "100.5"),     # c1 low=100
+        _candle(100, 100, 97, "98"),         # c2
+        _candle("99.5", "99.90", 96, "97"),  # c3 high=99.90 below c1.low
+    ]
+    disp = find_fvg(win, min_size_ticks=2, tick=Decimal("0.01"))
+    assert disp is not None
+    assert disp.type == "FVG_BEAR"
+    assert disp.upper_candle is win[0]   # c1 -> stop uses upper_candle.high for SHORT
+    assert disp.lower_candle is win[2]   # c3
+    assert disp.size == Decimal("0.10")
+
+
+def test_find_fvg_none_no_gap():
+    # overlapping candles -> no imbalance
+    win = [
+        _candle(98, 101, 97, "100"),
+        _candle(99, 102, 98, "101"),
+        _candle(100, 103, 99, "102"),  # c3.low=99 < c1.high=101 -> no bull gap
+    ]
+    assert find_fvg(win, min_size_ticks=2, tick=Decimal("0.01")) is None
+
+
+def test_find_fvg_none_gap_too_small():
+    # bull gap exists but only 1 tick (0.01) < min 2 ticks (0.02)
+    win = [
+        _candle(98, 100, 97, "99.5"),
+        _candle(100, 103, 100, "102"),
+        _candle("100.05", 104, "100.01", "103"),  # gap = 100.01-100 = 0.01
+    ]
+    assert find_fvg(win, min_size_ticks=2, tick=Decimal("0.01")) is None
+
+
+def test_find_fvg_none_short_window():
+    win = [_candle(98, 100, 97, "99"), _candle(100, 103, 100, "102")]  # only 2
+    assert find_fvg(win, min_size_ticks=2, tick=Decimal("0.01")) is None
