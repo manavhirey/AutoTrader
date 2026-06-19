@@ -102,3 +102,80 @@ def test_add_passthrough_1m_timeframe():
     assert emitted.ts_open == _dt(9, 30, 0)
     assert emitted.bars_present == 1
     assert emitted.data_incomplete is False
+
+
+def test_add_bucket_skip_emits_correctly():
+    """Bar at 09:30 then jump to 10:00 (skipping 09:45) — 09:30 bucket emits correctly."""
+    agg = Aggregator(15)
+    assert agg.add(_c1m(9, 30, "10", "12", "8", "11")) is None
+    # 10:00 bar belongs to a different bucket (10:00), skipping the 09:45 bucket entirely
+    emitted = agg.add(_c1m(10, 0, "20", "22", "18", "21"))
+    assert emitted is not None
+    assert emitted.ts_open == _dt(9, 30, 0)
+    assert emitted.ts_close == _dt(9, 45, 0)
+    assert emitted.bars_present == 1
+    assert emitted.data_incomplete is True  # 1 < 15
+    assert emitted.open == Decimal("10")
+    assert emitted.close == Decimal("11")
+    assert emitted.high == Decimal("12")
+    assert emitted.low == Decimal("8")
+
+
+def test_force_close_emits_partial_bucket_with_data_incomplete():
+    agg = Aggregator(15)
+    agg.add(_c1m(9, 30, "10", "12", "8", "11"))
+    agg.add(_c1m(9, 31, "11", "13", "9", "12"))
+    # boundary timer fires after the 09:30 bucket edge (09:45 + grace)
+    emitted = agg.force_close(_dt(9, 45, 3))
+    assert emitted is not None
+    assert emitted.ts_open == _dt(9, 30, 0)
+    assert emitted.ts_close == _dt(9, 45, 0)
+    assert emitted.bars_present == 2
+    assert emitted.data_incomplete is True
+    assert emitted.open == Decimal("10")
+    assert emitted.close == Decimal("12")
+    assert emitted.high == Decimal("13")
+    assert emitted.low == Decimal("8")
+
+
+def test_force_close_zero_children_emits_no_ohlc_candle():
+    # No 1m bar ever arrived for the 09:30 bucket; timer flushes it.
+    agg = Aggregator(15)
+    # Prime the open bucket to 09:30 without any children via a boundary at 09:45.
+    # Simulate the orchestrator priming the first bucket explicitly:
+    agg._bucket_ts = _dt(9, 30, 0)  # the orchestrator anchors the first bucket
+    emitted = agg.force_close(_dt(9, 45, 3))
+    assert emitted is not None
+    assert emitted.bars_present == 0
+    assert emitted.data_incomplete is True
+    assert emitted.open == Decimal("0")
+    assert emitted.high == Decimal("0")
+    assert emitted.low == Decimal("0")
+    assert emitted.close == Decimal("0")
+    assert emitted.volume == 0
+    assert emitted.timeframe_min == 15
+
+
+def test_force_close_idempotent_after_flush():
+    agg = Aggregator(15)
+    agg.add(_c1m(9, 30, "10", "12", "8", "11"))
+    first = agg.force_close(_dt(9, 45, 3))
+    assert first is not None
+    second = agg.force_close(_dt(9, 45, 3))
+    assert second is None  # already flushed -> nothing to emit
+
+
+def test_force_close_returns_none_when_no_open_bucket():
+    agg = Aggregator(15)
+    assert agg.force_close(_dt(9, 45, 3)) is None
+
+
+def test_force_close_then_next_add_starts_clean_bucket():
+    agg = Aggregator(15)
+    agg.add(_c1m(9, 30, "10", "12", "8", "11"))
+    agg.force_close(_dt(9, 45, 3))
+    # Next 1m bar (09:45 bucket) buffers without re-emitting the flushed 09:30 bucket.
+    assert agg.add(_c1m(9, 45, "20", "21", "19", "20")) is None
+    emitted = agg.add(_c1m(10, 0, "30", "30", "30", "30"))
+    assert emitted.ts_open == _dt(9, 45, 0)
+    assert emitted.bars_present == 1

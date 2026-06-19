@@ -47,7 +47,7 @@ class Aggregator:
         if self._bucket_ts is None:
             self._bucket_ts = b
         elif b != self._bucket_ts:
-            emitted = self._emit(bars_present=len(self._children))
+            emitted = self._emit()
             self._bucket_ts = b
             self._children = []
             self._seen_opens = set()
@@ -58,12 +58,18 @@ class Aggregator:
         self._children.append(one_min)
         return emitted
 
-    def _emit(self, bars_present: int) -> Candle:
-        """Build the closed T-candle for the currently-open bucket."""
+    def _emit(self) -> Candle:
+        """Build the closed T-candle for the currently-open bucket.
+
+        Derives ``bars_present`` from the current children snapshot so callers
+        cannot pass a stale count.
+        """
         assert self._bucket_ts is not None
         ts_open = self._bucket_ts
         ts_close = ts_open + timedelta(minutes=self.tf_min)
-        if bars_present == 0 or not self._children:
+        children = list(self._children)
+        bars_present = len(children)
+        if bars_present == 0:
             zero = Decimal("0")
             return Candle(
                 ts_open=ts_open,
@@ -80,12 +86,30 @@ class Aggregator:
         return Candle(
             ts_open=ts_open,
             ts_close=ts_close,
-            open=self._children[0].open,
-            high=max(c.high for c in self._children),
-            low=min(c.low for c in self._children),
-            close=self._children[-1].close,
-            volume=sum(c.volume for c in self._children),
+            open=children[0].open,
+            high=max(c.high for c in children),
+            low=min(c.low for c in children),
+            close=children[-1].close,
+            volume=sum(c.volume for c in children),
             timeframe_min=self.tf_min,
             data_incomplete=bars_present < self.tf_min,
             bars_present=bars_present,
         )
+
+    def force_close(self, boundary_ts: datetime) -> Candle | None:
+        """Timer-driven flush of the open bucket once its boundary has passed.
+
+        Emits a partial aggregate (``data_incomplete=True`` when children < tf_min)
+        or, if zero children buffered, a no-OHLC candle the engine refuses
+        (spec §10 #13). Idempotent: returns ``None`` when there is nothing open or
+        the boundary has not yet crossed the open bucket.
+        """
+        if self._bucket_ts is None:
+            return None
+        if bucket_start(boundary_ts, self.tf_min, self.anchor) <= self._bucket_ts:
+            return None  # boundary still inside the open bucket -> not closeable yet
+        emitted = self._emit()
+        self._bucket_ts = None
+        self._children = []
+        self._seen_opens = set()
+        return emitted
