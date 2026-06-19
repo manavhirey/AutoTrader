@@ -8,7 +8,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -213,9 +213,9 @@ class Settings(BaseSettings):
     )
 
     # --- secrets (env / .env) — no insecure defaults ---
-    alpaca_key: str = Field(validation_alias="ALPACA_KEY")
-    alpaca_secret: str = Field(validation_alias="ALPACA_SECRET")
-    discord_token: str | None = Field(default=None, validation_alias="DISCORD_TOKEN")
+    alpaca_key: SecretStr = Field(validation_alias="ALPACA_KEY")
+    alpaca_secret: SecretStr = Field(validation_alias="ALPACA_SECRET")
+    discord_token: SecretStr | None = Field(default=None, validation_alias="DISCORD_TOKEN")
     discord_channel_id: int | None = Field(
         default=None, validation_alias="DISCORD_CHANNEL_ID"
     )

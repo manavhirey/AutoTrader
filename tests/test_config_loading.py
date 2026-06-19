@@ -22,8 +22,8 @@ def test_loads_repo_config_yaml(monkeypatch):
     monkeypatch.delenv("DISCORD_CHANNEL_ID", raising=False)
     monkeypatch.delenv("DISCORD_APPROVER_USER_ID", raising=False)
     cfg = load_config(REPO_YAML)
-    assert cfg.alpaca_key == "k"
-    assert cfg.alpaca_secret == "s"
+    assert cfg.alpaca_key.get_secret_value() == "k"
+    assert cfg.alpaca_secret.get_secret_value() == "s"
     assert cfg.run.symbol == "SPY"
     assert cfg.run.live is False
     assert cfg.strategy.range_timeframe_min == 15
@@ -38,7 +38,7 @@ def test_env_overrides_yaml_for_secrets(monkeypatch, tmp_path):
     monkeypatch.setenv("ALPACA_SECRET", "envsecret")
     monkeypatch.delenv("DISCORD_TOKEN", raising=False)
     cfg = load_config(p)
-    assert cfg.alpaca_key == "envkey"
+    assert cfg.alpaca_key.get_secret_value() == "envkey"
     assert cfg.run.symbol == "QQQ"
 
 
@@ -108,3 +108,20 @@ def test_paper_discord_optional(monkeypatch, tmp_path):
     cfg = load_config(p)
     assert cfg.discord_token is None
     assert cfg.run.live is False
+
+
+def test_secrets_not_exposed_in_repr(monkeypatch, tmp_path):
+    p = _write_yaml(tmp_path, """
+        strategy: {}
+        run: {symbol: "SPY"}
+    """)
+    monkeypatch.setenv("ALPACA_KEY", "envkey")
+    monkeypatch.setenv("ALPACA_SECRET", "envsecret")
+    monkeypatch.setenv("DISCORD_TOKEN", "discordtoken")
+    monkeypatch.delenv("DISCORD_CHANNEL_ID", raising=False)
+    monkeypatch.delenv("DISCORD_APPROVER_USER_ID", raising=False)
+    cfg = load_config(p)
+    blob = repr(cfg) + str(cfg)
+    assert "envkey" not in blob
+    assert "envsecret" not in blob
+    assert "discordtoken" not in blob
