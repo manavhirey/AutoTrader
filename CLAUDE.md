@@ -104,7 +104,27 @@ write-ups live in the `.superpowers/sdd/progress.md` roll-up. (Beyond this list,
   have flatten surface partial-failure signal so the orchestrator can detect a still-open position before
   market close. *(Found: T28 security review; orchestrator-scoped, tasks 38-45.)*
 
+- [ ] **[HIGH] Missed/dropped trade-update fill is silent — needs orchestrator reconciliation + a stream-liveness watchdog.**
+  `_on_trade_update` now wraps its body in `try/except` so a malformed event can't kill the stream (good) —
+  but a dropped event is a **silently missed fill**: a missed EXIT fill leaves the bot believing it's still in
+  a position. The stdlib logger records it, but nothing surfaces it. Before live: add orchestrator-side
+  reconciliation (poll `get_order`/positions to confirm fills) and a stream-liveness watchdog (expected-fill
+  timeout) so a stalled/lossy stream is detected. *(Found: T29 security review; orchestrator scope, tasks 38-45.)*
+- [ ] **[MED] Trade-updates `asyncio.Queue()` is unbounded — pick a `maxsize` + full-policy once the consumer is wired.**
+  No backpressure; if the orchestrator consumer stalls, the queue grows unbounded. Decide block-vs-drop-with-alert
+  and set a sane `maxsize` (the SDK itself caps at ~1024). Deferred until the orchestrator wires the consumer so
+  the policy can be chosen with the consumer in view. *(Found: T29 security review.)*
+- [ ] **[LOW] `leg_role_for(coid, parent_coid)` ignores `parent_coid` (dead param).** Classification is suffix-only
+  (intentional for single-symbol). Drop the unused second arg or document why it's retained (future multi-symbol).
+  *(Found: T29 review; Task 25 code.)*
+
 ### Resolved-during-build findings log (audit trail; fixed in the named commit)
+- [x] **[T29 High×3 + robustness] `_on_trade_update` real-SDK-boundary + stream-survival.** `side=str(enum)` →
+  `'OrderSide.BUY'` (now `.value`); `int(filled_qty)`/`int(position_qty)` crashed on float-shaped strings (now
+  `Decimal`-coerced); event-enum `str()` mismatch (now `.value`-normalized); `Decimal(str(None))` price crash
+  (now None-guarded); and — most important — the callback is now wrapped in `try/except Exception` so one bad
+  event can't permanently kill fill processing. Plus `start_stream` double-start guard + `create_task`, and a
+  real-`OrderSide`/`TradeEvent`-enum regression test so the fakes stop masking the boundary. Fixed in T29 commit.
 - [x] **[T28 Nit] `get_order` test didn't verify the `order_id` was forwarded** to the SDK (fake discarded
   it). Fake now records `requested_order_id`; test asserts it. Fixed in T28 commit.
 - [x] **[T28 Low] Unguarded account-mutating primitives lacked warnings.** Added docstrings to

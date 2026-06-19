@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import date
 from decimal import Decimal
 from typing import Any
 
 from ..config import RunConfig
-from ..models import AccountSnapshot, ClockInfo, Direction, OrderResult, Setup
+from ..models import AccountSnapshot, ClockInfo, Direction, Fill, OrderResult, Setup
+
+logger = logging.getLogger(__name__)
 
 _KNOWN_LEGS = {"ENTRY", "TP", "SL", "FLATTEN"}
+_EXIT_REASON = {"TP": "TARGET", "SL": "STOP", "FLATTEN": "FLATTEN"}
+_FILL_EVENTS = {"fill", "partial_fill"}
 
 
 def client_order_id(session_date: date, symbol: str, seq: int, leg_role: str) -> str:
@@ -152,3 +157,69 @@ class AlpacaBroker:
         """Liquidate ALL open positions account-wide via close_all_positions(cancel_orders=True),
         idempotent server-side. Unguarded primitive — caller owns safety/ordering."""
         await asyncio.to_thread(self._client.close_all_positions, cancel_orders=True)
+
+    async def _on_trade_update(self, data: Any) -> None:
+        """SDK async callback → enqueue a Fill (only for (partial_)fill events).
+        canceled/rejected are not fills; the orchestrator handles those via reconciliation."""
+        try:
+            raw = getattr(data, "event", "")
+            event = str(getattr(raw, "value", raw))
+            if event not in _FILL_EVENTS:
+                return
+            order = data.order
+            coid = str(order.client_order_id)
+            role = leg_role_for(coid, self._parent_coid or "")
+            fap = order.filled_avg_price
+            price_raw = fap if fap is not None else getattr(data, "price", None)
+            if price_raw is None:
+                logger.warning("dropping trade update (no price): event=%s coid=%s", event, coid)
+                return
+            fill = Fill(
+                order_id=str(order.id),
+                client_order_id=coid,
+                leg_role=role,
+                side=str(getattr(order.side, "value", order.side)),
+                price=Decimal(str(price_raw)),
+                qty=int(Decimal(str(getattr(order, "filled_qty", 0) or 0))),
+                ts=data.timestamp,
+                position_qty=int(Decimal(str(getattr(data, "position_qty", 0) or 0))),
+                exit_reason=_EXIT_REASON.get(role),
+            )
+            await self._queue.put(fill)
+        except Exception:
+            raw_event = getattr(data, "event", "?")
+            coid_ctx = getattr(getattr(data, "order", None), "client_order_id", "?")
+            logger.exception("dropping trade update: event=%s coid=%s", raw_event, coid_ctx)
+            return
+
+    async def start_stream(self) -> None:
+        """Register the trade-updates handler and schedule _run_forever as an asyncio task.
+        Never calls stream.run() or asyncio.run() — those block the event loop (spec §13).
+        Guard against double-start: if a live task already exists, return immediately."""
+        existing = getattr(self, "_stream_task", None)
+        if existing is not None and not existing.done():
+            return
+        self._stream.subscribe_trade_updates(self._on_trade_update)
+        self._stream_task = asyncio.create_task(self._stream._run_forever())
+
+    async def stop_stream(self) -> None:
+        """Gracefully stop the stream: await stop_ws() first, then cancel the task.
+        Never calls the sync stop() method (misbehaves on the same event loop)."""
+        await self._stream.stop_ws()
+        task = getattr(self, "_stream_task", None)
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    def trade_updates(self):
+        """Async generator that drains self._queue and yields Fill objects.
+        Sync def with async generator body — matches AsyncIterator[Fill] Protocol."""
+        async def _gen():
+            while True:
+                fill = await self._queue.get()
+                yield fill
+
+        return _gen()
