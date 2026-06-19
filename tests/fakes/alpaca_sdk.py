@@ -51,6 +51,7 @@ class FakeTradingClient:
     canceled_all: int = 0
     closed_all: list = field(default_factory=list)        # cancel_orders kwargs
     thread_ids: list = field(default_factory=list)        # records the thread each sync call ran on
+    requested_order_id: str | None = None
 
     def get_account(self):
         self.thread_ids.append(threading.get_ident())
@@ -67,6 +68,7 @@ class FakeTradingClient:
 
     def get_order_by_id(self, order_id):
         self.thread_ids.append(threading.get_ident())
+        self.requested_order_id = order_id
         return self.next_order
 
     def cancel_orders(self):

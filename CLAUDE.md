@@ -66,6 +66,14 @@ write-ups live in the `.superpowers/sdd/progress.md` roll-up. (Beyond this list,
   `tick_size`, correct direction, before `validate_setup` so RR math stays consistent) — NOT in the
   broker (would mutate engine prices behind its back / break the purity boundary). Add an
   ATR-buffer test asserting penny-aligned prices. *(Found: T27 security review.)*
+- [ ] **[HIGH] `flatten`/`cancel_all` are ACCOUNT-WIDE, not symbol-scoped — needs a decision before live.**
+  `flatten` → `close_all_positions(cancel_orders=True)` and `cancel_all` → `cancel_orders()` both hit
+  **every symbol in the Alpaca account**, not just `run.symbol`. If the account also holds unrelated
+  positions (manual trades, another bot, long-term holdings), the EOD flatten timer **market-liquidates
+  the entire account** automatically. The brief mandates these account-wide SDK calls (so a fix needs
+  sign-off): either (a) make them symbol-scoped — `close_position(run.symbol)` + cancel only orders whose
+  symbol/coid-prefix matches — or (b) add a startup hard-gate asserting the account holds no non-bot
+  positions/orders + a CRITICAL "flatten liquidates the WHOLE account" warning. *(Found: T28 security review.)*
 - [ ] **[MED] Order-submission idempotency + single-flight guard (orchestrator, tasks 38-45).**
   `submit_bracket` advances `_seq`/`_parent_coid` before the `to_thread` submit. Seq always advances
   so two ENTRY orders never share a coid, but: (a) a submit that reached Alpaca but timed out on the
@@ -82,3 +90,25 @@ write-ups live in the `.superpowers/sdd/progress.md` roll-up. (Beyond this list,
   `qty < 1` then `int(qty)` — silently truncates a float `qty>1` (1.7→1) and accepts `True` (bool ⊂
   int). Reject non-int qty so a sizing bug fails loud rather than placing a wrong quantity. *(Found:
   T27 review; defense-in-depth, not a current defect — `qty` is `int`-typed.)*
+- [ ] **[MED] `flatten` can't tag the FLATTEN close with a deterministic `client_order_id` (spec §8 step 9 / §16).**
+  Alpaca's `close_all_positions` issues broker-initiated closes with auto-generated ids, so the spec's
+  "orchestrator records the FLATTEN coid before flattening, fill is attributable" is unenforceable through
+  this primitive — attribution falls back to the `leg_role_for` unknown-coid⇒FLATTEN heuristic. Either
+  implement flatten as a tagged single-symbol closing order (deterministic FLATTEN coid) or update the
+  spec to document the heuristic as the contract. *(Found: T28 security review; spec/SDK mismatch.)*
+- [ ] **[MED] No partial-failure handling on `flatten`; missing `get_position` reconciliation primitive (orchestrator).**
+  `flatten` ignores `close_all_positions`'s 207 multi-status body, so a position that **failed** to close
+  is silently treated as flat; transient errors (429/422/network) propagate raw into the EOD timer with no
+  retry/reconcile. The spec's mitigation (reconcile via `get_position()==0` at `next_close`) is currently
+  unimplementable — no `get_position`/`get_open_position(symbol)` primitive exists on the broker. Add it and
+  have flatten surface partial-failure signal so the orchestrator can detect a still-open position before
+  market close. *(Found: T28 security review; orchestrator-scoped, tasks 38-45.)*
+
+### Resolved-during-build findings log (audit trail; fixed in the named commit)
+- [x] **[T28 Nit] `get_order` test didn't verify the `order_id` was forwarded** to the SDK (fake discarded
+  it). Fake now records `requested_order_id`; test asserts it. Fixed in T28 commit.
+- [x] **[T28 Low] Unguarded account-mutating primitives lacked warnings.** Added docstrings to
+  `get_order`/`cancel_all`/`flatten` noting they are thin account-mutating primitives and ordering/safety
+  is the orchestrator's responsibility. Fixed in T28 commit.
+- [x] **[T27 High] `_to_order_result` status used `str(enum)` → `'OrderStatus.ACCEPTED'`** instead of the
+  wire string; **filled_qty `int('10.0')` crashed.** Fixed via `.value` + `Decimal` coercion in commit `9098f66`.

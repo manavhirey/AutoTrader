@@ -137,3 +137,18 @@ class AlpacaBroker:
         )
         order = await asyncio.to_thread(self._client.submit_order, req)
         return _to_order_result(order)
+
+    async def get_order(self, order_id: str) -> OrderResult:
+        """Fetch an order by id and map via _to_order_result."""
+        order = await asyncio.to_thread(self._client.get_order_by_id, order_id)
+        return _to_order_result(order)
+
+    async def cancel_all(self) -> None:
+        """Cancel ALL open orders account-wide (alpaca cancel_orders). Unguarded primitive
+        — the orchestrator owns cancel-before-flatten ordering (spec §13/§16)."""
+        await asyncio.to_thread(self._client.cancel_orders)
+
+    async def flatten(self) -> None:
+        """Liquidate ALL open positions account-wide via close_all_positions(cancel_orders=True),
+        idempotent server-side. Unguarded primitive — caller owns safety/ordering."""
+        await asyncio.to_thread(self._client.close_all_positions, cancel_orders=True)
