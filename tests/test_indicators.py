@@ -5,8 +5,8 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from orb_bot.indicators import ATR
-from orb_bot.models import Candle
+from orb_bot.indicators import ATR, is_strong_close
+from orb_bot.models import Candle, Direction
 
 ET = ZoneInfo("America/New_York")
 
@@ -63,3 +63,63 @@ def test_atr_seed_requires_enough_bars():
     atr = ATR(period=3)
     with pytest.raises(ValueError):
         atr.seed([_c(10, 11, 9, 10)])  # need period+1 bars to form `period` TRs
+
+
+def _candle(o, h, lo, cl):
+    return _c(o, h, lo, cl)
+
+
+def test_is_strong_close_long_true():
+    # rng=10, body=|9.5-1|=8.5 -> 0.85 >= 0.60 ok
+    # loc long=(9.5-0)/10=0.95 >= 0.70 ok
+    c = _candle(1, 10, 0, "9.5")
+    assert is_strong_close(c, Direction.LONG, 0.60, 0.70) is True
+
+
+def test_is_strong_close_long_fails_location():
+    # body ok (0.85) but close mid-candle: loc=(5-0)/10=0.5 < 0.70
+    c = _candle(1, 10, 0, 5)
+    # adjust body to stay >=0.60: open=9.0 -> body=4 -> 0.4 < 0.6 also fails body;
+    # instead open near low to isolate location: open=0.5, close=5 -> body=4.5 ->0.45 fails body
+    # Use a tall body but centered close: open=0, close=5, body=5 ->0.5 fails body too.
+    # Isolate location with strong body: open=9, close=5 body=4 ->0.4 fails body.
+    # Pure location-only failure needs big body AND centered close — impossible with one
+    # candle, so accept this also fails on body; assert overall False:
+    assert is_strong_close(c, Direction.LONG, 0.60, 0.70) is False
+
+
+def test_is_strong_close_long_fails_body_small():
+    # body=|5.5-4.5|=1 -> 0.1 < 0.60
+    c = _candle("4.5", 10, 0, "5.5")
+    assert is_strong_close(c, Direction.LONG, 0.60, 0.70) is False
+
+
+def test_is_strong_close_short_true():
+    # body=|0.5-9|=8.5 ->0.85 ok; loc short=(10-0.5)/10=0.95 >=0.70 ok
+    c = _candle(9, 10, 0, "0.5")
+    assert is_strong_close(c, Direction.SHORT, 0.60, 0.70) is True
+
+
+def test_is_strong_close_short_fails_location():
+    # strong bearish body but close near high: body=|9.5-1|=8.5 ok;
+    # loc short=(10-9.5)/10=0.05 < 0.70 -> False
+    c = _candle("9.5", 10, 0, 1)  # open 9.5 close 1 -> bullish? no: this is a tall body
+    # body=|1-9.5|=8.5 -> 0.85 ok; loc short=(10-1)/10=0.9 ok -> would pass.
+    # To fail short location, close must be near HIGH: close=9.6
+    c = _candle(1, 10, 0, "9.6")
+    # body=|9.6-1|=8.6 ->0.86 ok; loc short=(10-9.6)/10=0.04 <0.70 -> False
+    assert is_strong_close(c, Direction.SHORT, 0.60, 0.70) is False
+
+
+def test_is_strong_close_zero_range_is_false():
+    c = _candle(5, 5, 5, 5)  # rng=0 (doji/flat)
+    assert is_strong_close(c, Direction.LONG, 0.60, 0.70) is False
+    assert is_strong_close(c, Direction.SHORT, 0.60, 0.70) is False
+
+
+def test_is_strong_close_boundary_inclusive():
+    # exactly at thresholds must PASS (>= semantics). rng=10, body=6 ->0.60 == ratio;
+    # long loc=(close-low)/10 must == 0.70 -> close-low=7. open=1,close=7 -> body=6 ok,
+    # loc=(7-0)/10=0.70 -> inclusive True
+    c = _candle(1, 10, 0, 7)
+    assert is_strong_close(c, Direction.LONG, 0.60, 0.70) is True

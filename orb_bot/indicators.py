@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from .models import Candle
+from .models import Candle, Direction
 
 
 def _true_range(bar: Candle, prev_close: Decimal) -> Decimal:
@@ -69,3 +69,28 @@ class ATR:
         self._value = (self._value * (p - 1) + tr) / p
         self._prev_close = bar.close
         return self._value
+
+
+def is_strong_close(
+    c: Candle, direction: Direction, body_ratio: float, location: float
+) -> bool:
+    """Spec §5: quantified strong close.
+
+    body = |close-open|; rng = high-low.
+    body_ok = body/rng >= body_ratio.
+    LONG  loc_ok = (close-low)/rng  >= location.
+    SHORT loc_ok = (high-close)/rng >= location.
+    Degenerate rng==0 -> False.
+    """
+    rng = c.high - c.low
+    if rng <= 0:
+        return False
+    body = abs(c.close - c.open)
+    body_ratio_d = Decimal(str(body_ratio))
+    location_d = Decimal(str(location))
+    body_ok = (body / rng) >= body_ratio_d
+    if direction is Direction.LONG:
+        loc_ok = ((c.close - c.low) / rng) >= location_d
+    else:
+        loc_ok = ((c.high - c.close) / rng) >= location_d
+    return bool(body_ok and loc_ok)
