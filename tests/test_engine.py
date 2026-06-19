@@ -217,6 +217,19 @@ def test_is_range_day_requires_both_sweeps():
     assert eng.is_range_day(ctx, e.cfg) is True
 
 
+def test_is_range_day_false_when_sweep_both_disabled():
+    # sec.7: is_range_day = range_day_sweep_both AND swept_high AND swept_low.
+    # With range_day_sweep_both=False, range-day detection is OFF: always False
+    # even when both sides are swept (no `or` self-suppression branch).
+    e = eng.Engine(_cfg(range_day_sweep_both=False), SESSION_DATE)
+    ctx = _ctx_after_range(e)
+    ctx.swept_high = True
+    ctx.swept_low = False
+    assert eng.is_range_day(ctx, e.cfg) is False
+    ctx.swept_low = True
+    assert eng.is_range_day(ctx, e.cfg) is False
+
+
 def test_apply_day_type_filter_disables_breakout_and_retest():
     e = eng.Engine(
         _cfg(
@@ -306,6 +319,58 @@ def test_on_candle_confirm_breakout_short_transitions_wait_entry():
     )
 
 
+# --- Fix: direction_allowed gate (sec.4 line 159 / sec.7 lines 305-307) ------
+def test_allow_long_false_blocks_long_breakout_no_confirm():
+    # allow_long=False: a strong LONG breakout must NOT confirm -- the engine
+    # stays in WAIT_CONFIRMATION with no direction and no DirectionConfirmed.
+    e = eng.Engine(_cfg(allow_long=False), SESSION_DATE)
+    e.on_candle(make_candle("09:30", 100, 105, 98, 102))  # range
+    evs = e.on_candle(make_candle("09:45", 105.5, 108.2, 105.0, 108.0))
+    assert e.ctx.state is State.WAIT_CONFIRMATION
+    assert e.ctx.direction is None
+    assert e.ctx.break_level is None
+    assert all(not isinstance(ev, m.DirectionConfirmed) for ev in evs)
+
+
+def test_allow_long_false_still_allows_short_breakout():
+    # The allowed (SHORT) side still confirms when only LONG is blocked.
+    e = eng.Engine(_cfg(allow_long=False), SESSION_DATE)
+    e.on_candle(make_candle("09:30", 100, 105, 98, 102))  # range
+    evs = e.on_candle(make_candle("09:45", 97.5, 98.0, 94.0, 94.2))
+    assert e.ctx.state is State.WAIT_ENTRY
+    assert e.ctx.direction is Direction.SHORT
+    assert e.ctx.break_level == Decimal("98")
+    assert any(
+        isinstance(ev, m.DirectionConfirmed) and ev.direction is Direction.SHORT
+        for ev in evs
+    )
+
+
+def test_allow_short_false_blocks_short_breakout_no_confirm():
+    # allow_short=False: a strong SHORT breakout must NOT confirm.
+    e = eng.Engine(_cfg(allow_short=False), SESSION_DATE)
+    e.on_candle(make_candle("09:30", 100, 105, 98, 102))  # range
+    evs = e.on_candle(make_candle("09:45", 97.5, 98.0, 94.0, 94.2))
+    assert e.ctx.state is State.WAIT_CONFIRMATION
+    assert e.ctx.direction is None
+    assert e.ctx.break_level is None
+    assert all(not isinstance(ev, m.DirectionConfirmed) for ev in evs)
+
+
+def test_allow_short_false_still_allows_long_breakout():
+    # The allowed (LONG) side still confirms when only SHORT is blocked.
+    e = eng.Engine(_cfg(allow_short=False), SESSION_DATE)
+    e.on_candle(make_candle("09:30", 100, 105, 98, 102))  # range
+    evs = e.on_candle(make_candle("09:45", 105.5, 108.2, 105.0, 108.0))
+    assert e.ctx.state is State.WAIT_ENTRY
+    assert e.ctx.direction is Direction.LONG
+    assert e.ctx.break_level == Decimal("105")
+    assert any(
+        isinstance(ev, m.DirectionConfirmed) and ev.direction is Direction.LONG
+        for ev in evs
+    )
+
+
 def test_on_candle_wick_only_no_transition():
     e = eng.Engine(_cfg(), SESSION_DATE)
     e.on_candle(make_candle("09:30", 100, 105, 98, 102))
@@ -350,6 +415,33 @@ def test_range_day_suppresses_same_bar_breakout():
     assert e.ctx.direction is None
     assert any(isinstance(ev, m.RangeDayDetected) for ev in evs)
     assert all(not isinstance(ev, m.DirectionConfirmed) for ev in evs)
+
+
+def test_sweep_both_false_does_not_self_suppress_breakout():
+    # sec.7: with range_day_sweep_both=False, is_range_day is always False, so a
+    # normal breakout is NOT self-suppressed -- range_day never latches and the
+    # breakout confirms to WAIT_ENTRY (even after both sides have been swept).
+    e = eng.Engine(
+        _cfg(
+            range_day_sweep_both=False,
+            range_day_disables=["breakout", "retest"],
+            range_day_enables=[],
+        ),
+        SESSION_DATE,
+    )
+    e.on_candle(make_candle("09:30", 100, 105, 98, 102))  # range
+    # pre-sweep the low (close back inside) -- one side swept
+    e.on_candle(make_candle("09:45", 101, 104, 96, 100))
+    assert e.ctx.swept_low is True
+    assert e.ctx.range_day is False
+    # candle sweeps high AND closes strong above: both sides now swept, but
+    # range-day detection is disabled -> no suppression -> confirm.
+    evs = e.on_candle(make_candle("10:00", 105.5, 109.0, 105.0, 108.5))
+    assert e.ctx.range_day is False
+    assert e.ctx.state is State.WAIT_ENTRY
+    assert e.ctx.direction is Direction.LONG
+    assert all(not isinstance(ev, m.RangeDayDetected) for ev in evs)
+    assert any(isinstance(ev, m.DirectionConfirmed) for ev in evs)
 
 
 def test_window_expiry_emits_window_expired_and_done():

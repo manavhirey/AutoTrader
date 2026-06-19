@@ -54,10 +54,12 @@ def track_sweeps(ctx: Context, candle: Candle, cfg: StrategyConfig) -> None:
 
 
 def is_range_day(ctx: Context, cfg: StrategyConfig) -> bool:
-    """sec.10 #7: single-symbol range day = both sides swept within the window."""
-    if cfg.range_day_sweep_both:
-        return ctx.swept_high and ctx.swept_low
-    return ctx.swept_high or ctx.swept_low
+    """sec.7: range day = range_day_sweep_both AND swept_high AND swept_low.
+
+    When range_day_sweep_both is False, range-day detection is disabled entirely
+    (always False) -- it only applies when configured for a both-sides sweep.
+    """
+    return cfg.range_day_sweep_both and ctx.swept_high and ctx.swept_low
 
 
 def apply_day_type_filter(ctx: Context, cfg: StrategyConfig) -> None:
@@ -215,6 +217,10 @@ class Engine:
                 and direction is self._last_traded_direction
             ):
                 direction = None
+            # sec.4/sec.7: gate confirmation by direction_allowed; a disallowed
+            # side never confirms (stay WAIT_CONFIRMATION, direction stays None).
+            if direction is not None and not self._direction_allowed(direction):
+                direction = None
             if direction is not None:
                 self.ctx.direction = direction
                 self.ctx.break_level = (
@@ -234,6 +240,13 @@ class Engine:
         if not events:
             events.append(m.NoOp())
         return events
+
+    def _direction_allowed(self, direction: Direction) -> bool:
+        """sec.7 direction_allowed: LONG gated by cfg.allow_long, SHORT by
+        cfg.allow_short (higher-TF bias handling lives upstream / deferred)."""
+        if direction is Direction.LONG:
+            return self.cfg.allow_long
+        return self.cfg.allow_short
 
     def _breakout_enabled(self) -> bool:
         if not self.cfg.enable_breakout:
