@@ -7,6 +7,7 @@ import pytest
 from orb_bot import models
 from orb_bot.models import Direction, Model
 from orb_bot.reporting import summary
+from orb_bot.reporting.log import LogReporter
 
 ET = ZoneInfo("America/New_York")
 
@@ -258,3 +259,95 @@ def test_build_trade_result_empty_exit_fills_raises():
 def test_weighted_avg_price_single_fill():
     fills = [_fill("ENTRY", "buy", "50.00", 10)]
     assert summary.weighted_avg_price(fills) == Decimal("50.00")
+
+
+class _RecordingLogger:
+    """Minimal structlog-style stub: records (event, kwargs) per level."""
+
+    def __init__(self):
+        self.events = []
+
+    def info(self, event, **kw):
+        self.events.append(("info", event, kw))
+
+    def warning(self, event, **kw):
+        self.events.append(("warning", event, kw))
+
+    def bind(self, **kw):  # structlog API surface used defensively
+        return self
+
+
+def _setup(direction=Direction.LONG):
+    return models.Setup(
+        direction=direction,
+        model=Model.BREAKOUT,
+        entry=Decimal("100.00"),
+        stop=Decimal("99.50"),
+        target=Decimal("101.00"),
+        rr=2.0,
+        reason=["strong close above OR high"],
+    )
+
+
+@pytest.mark.asyncio
+async def test_logreporter_trade_taken_logs_fields():
+    log = _RecordingLogger()
+    r = LogReporter(logger=log)
+    await r.start()
+    await r.trade_taken(_setup(), qty=10, mode="PAPER")
+    await r.close()
+    kinds = [e[1] for e in log.events]
+    assert "trade_taken" in kinds
+    ev = next(e for e in log.events if e[1] == "trade_taken")
+    kw = ev[2]
+    assert kw["direction"] == "LONG"
+    assert kw["model"] == "BREAKOUT"
+    assert kw["qty"] == 10
+    assert kw["mode"] == "PAPER"
+    assert kw["entry"] == "100.00"
+    assert kw["stop"] == "99.50"
+    assert kw["target"] == "101.00"
+
+
+@pytest.mark.asyncio
+async def test_logreporter_session_report_logs_totals_and_trades():
+    log = _RecordingLogger()
+    r = LogReporter(logger=log)
+    s = summary.build_session_summary(
+        trades=[_tr("20.00", reason="TARGET"), _tr("-10.00", reason="STOP")],
+        start_equity=Decimal("10000.00"),
+        end_equity=Decimal("10010.00"),
+        mode="PAPER",
+        symbol="AAPL",
+        session_date=date(2026, 6, 19),
+        no_trade_reason=None,
+    )
+    await r.session_report(s)
+    ev = next(e for e in log.events if e[1] == "session_report")
+    kw = ev[2]
+    assert kw["total_pnl"] == "10.00"
+    assert kw["total_pnl_pct"] == "0.10"          # fraction 0.001 * 100
+    assert kw["wins"] == 1 and kw["losses"] == 1 and kw["breakevens"] == 0
+    assert kw["n_trades"] == 2
+    assert len(kw["trades"]) == 2
+    assert kw["trades"][0]["pnl"] == "20.00"
+
+
+@pytest.mark.asyncio
+async def test_logreporter_session_report_no_trade_zero_and_reason():
+    log = _RecordingLogger()
+    r = LogReporter(logger=log)
+    s = summary.build_session_summary(
+        trades=[],
+        start_equity=Decimal("10000.00"),
+        end_equity=Decimal("10000.00"),
+        mode="LIVE",
+        symbol="MSFT",
+        session_date=date(2026, 6, 19),
+        no_trade_reason="no confirmed breakout/entry",
+    )
+    await r.session_report(s)
+    kw = next(e for e in log.events if e[1] == "session_report")[2]
+    assert kw["total_pnl"] == "0.00"
+    assert kw["no_trade_reason"] == "no confirmed breakout/entry"
+    assert kw["trades"] == []
