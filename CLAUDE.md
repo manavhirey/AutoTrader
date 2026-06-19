@@ -136,7 +136,15 @@ write-ups live in the `.superpowers/sdd/progress.md` roll-up. (Beyond this list,
   `run.live` ⇒ the approver is `DiscordApprover` (and paper ⇒ AutoApprover), failing fast otherwise. *(Found: T32
   security review.)*
 
+- [ ] **[LOW-ops] Make log timestamps timezone-explicit.** `logconf` uses `TimeStamper(fmt="iso", utc=False)`,
+  which can emit naive (no-offset) ISO timestamps depending on the host TZ — ambiguous for trade-log forensics.
+  Use `utc=True` (Z suffix) or an explicit `%z` offset. *(Found: T37 review; Low, current behavior is defensible.)*
+
 ### Resolved-during-build findings log (audit trail; fixed in the named commit)
+- [x] **[T37 logging] logconf hardening.** Review found no critical bugs / no secret leakage / JSON-injection safe.
+  Fixed: log dir/file restricted to owner-only (0o700/0o600 — trade data); filename includes run_id (avoids same-day
+  two-run collision/truncation); invalid level now raises ValueError (was silent INFO fallback); autouse teardown
+  fixture closes root handlers so the global-logging tests don't contaminate the 293-test suite. Fixed in T37 commit.
 - [x] **[T36 reporting] DiscordReporter hardening + integration gap.** Added the missing `DiscordClient.send_embed`
   (reporter would have AttributeError'd in production — tests only had a fake). Fixed: embed "Trades" field guarded
   against Discord's 1024-char limit (was a silent EOD-report drop at high trade counts, High); `_range_meta` absent
