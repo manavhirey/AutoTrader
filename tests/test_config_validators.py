@@ -104,6 +104,20 @@ def test_nonempty_range_day_enables_rejected():
         _ok(range_day_enables=["reversal"])
 
 
+def test_boundary_values_pass():
+    """Test that exact boundary values at spec limits are ACCEPTED.
+
+    These green-path tests ensure validator boundaries are <=/>= not </>,
+    catching future off-by-one errors in safety-critical config gates.
+    """
+    assert _ok(risk_per_trade_pct=100.0).risk_per_trade_pct == 100.0
+    assert _ok(or_min_bars=1).or_min_bars == 1
+    assert _ok(or_min_bars=15).or_min_bars == 15  # at T (default)
+    # T=15, trading_window_min=120 -> max wait = 120/15 = 8
+    assert _ok(retest_max_wait_candles=8).retest_max_wait_candles == 8
+    assert _ok(flatten_buffer_min=0).flatten_buffer_min == 0
+
+
 def test_valid_t5_config_passes():
     cfg = StrategyConfig(
         range_timeframe_min=5,
