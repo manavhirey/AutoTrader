@@ -137,6 +137,12 @@ write-ups live in the `.superpowers/sdd/progress.md` roll-up. (Beyond this list,
   security review.)*
 
 ### Resolved-during-build findings log (audit trail; fixed in the named commit)
+- [x] **[T33 approval gate] DiscordApprover fail-closed hardening.** Security review confirmed NO path returns
+  APPROVE without a genuine authorized click (interaction_check blocks non-approvers at discord.py's dispatch
+  level; stale/replayed views are inert; no secret leakage; downstream gates on exact `== "APPROVE"`). Fixed:
+  `is_ready` guard default flipped True→False (fail closed for a missing attr); unauthorized clicks now logged
+  (audit trail); load-bearing `done()`-guard comment; +tests for missing-is_ready⇒REJECT, the wait_for TIMEOUT
+  backstop, and the non-approver-can't-resolve-the-future contract. Fixed in T33 commit.
 - [x] **[T31 High + hardening] DiscordClient startup/fail-closed.** `start_in_background` no longer hangs forever on
   a failed `bot.start()` (bad token/network) — it races readiness against task completion and re-raises the start
   error; a crashed background task is now logged via a done-callback; `resolve_channel` validates the channel is
