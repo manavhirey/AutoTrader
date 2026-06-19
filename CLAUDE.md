@@ -137,6 +137,11 @@ write-ups live in the `.superpowers/sdd/progress.md` roll-up. (Beyond this list,
   security review.)*
 
 ### Resolved-during-build findings log (audit trail; fixed in the named commit)
+- [x] **[T34 reporting] P/L math verified correct + edge guards.** Review confirmed LONG/SHORT sign, share-weighting,
+  qty=min, pnl_pct-as-fraction, and wins+losses+breakevens==len(trades) are all correct, and the module is pure.
+  Added `start_equity <= 0` guards (clear ValueError instead of cryptic DivisionByZero) and tests (SHORT
+  end-to-end, start_equity guard, empty-fills guards, single-fill avg). Non-terminating averages round (no crash);
+  display-formatting is the reporters' job (Tasks 35/36). Fixed in T34 commit.
 - [x] **[T33 approval gate] DiscordApprover fail-closed hardening.** Security review confirmed NO path returns
   APPROVE without a genuine authorized click (interaction_check blocks non-approvers at discord.py's dispatch
   level; stale/replayed views are inert; no secret leakage; downstream gates on exact `== "APPROVE"`). Fixed:
