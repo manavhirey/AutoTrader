@@ -173,3 +173,24 @@ def find_fvg(
             type="FVG_BEAR", upper_candle=c1, lower_candle=c3, size=bear_gap
         )
     return None
+
+
+def detect_displacement(
+    window: list[Candle], model: str, atr: Decimal, cfg
+) -> Displacement | None:
+    """§12/§7 dispatch to the configured displacement model.
+
+    IMPULSE  -> find_impulse(window, atr, cfg.impulse_atr_mult)
+    FVG      -> find_fvg(window, cfg.fvg_min_size_ticks, tick=cfg.tick_size)
+    TRUE_GAP -> None (deferred this build)
+    unknown  -> ValueError
+    """
+    if model == "IMPULSE":
+        return find_impulse(window, atr, cfg.impulse_atr_mult)
+    if model == "FVG":
+        return find_fvg(
+            window, cfg.fvg_min_size_ticks, Decimal(str(cfg.tick_size))
+        )
+    if model == "TRUE_GAP":
+        return None
+    raise ValueError(f"unknown displacement_model: {model!r}")

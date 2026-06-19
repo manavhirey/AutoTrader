@@ -1,11 +1,20 @@
 # tests/test_indicators.py
+from dataclasses import dataclass as _dc
 from datetime import datetime
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 import pytest
 
-from orb_bot.indicators import ATR, find_fvg, find_impulse, find_swing, is_strong_close, within
+from orb_bot.indicators import (
+    ATR,
+    detect_displacement,
+    find_fvg,
+    find_impulse,
+    find_swing,
+    is_strong_close,
+    within,
+)
 from orb_bot.models import Candle, Direction
 
 ET = ZoneInfo("America/New_York")
@@ -343,3 +352,42 @@ def test_find_fvg_none_gap_too_small():
 def test_find_fvg_none_short_window():
     win = [_candle(98, 100, 97, "99"), _candle(100, 103, 100, "102")]  # only 2
     assert find_fvg(win, min_size_ticks=2, tick=Decimal("0.01")) is None
+
+
+# ---------------------------------------------------------------------------
+# detect_displacement tests
+# ---------------------------------------------------------------------------
+
+
+@_dc
+class _CfgStub:
+    displacement_model: str = "IMPULSE"
+    impulse_atr_mult: float = 1.5
+    fvg_min_size_ticks: int = 2
+    tick_size: float = 0.01
+
+
+def test_detect_displacement_impulse():
+    win = [_candle(1, 10, 0, "9.5")]  # rng=10 strong bullish
+    disp = detect_displacement(win, "IMPULSE", atr=Decimal("2"), cfg=_CfgStub())
+    assert disp is not None and disp.type == "IMPULSE"
+
+
+def test_detect_displacement_fvg():
+    win = [
+        _candle(98, 100, 97, "99.5"),
+        _candle(100, 103, 100, "102"),
+        _candle("100.10", 104, "100.05", "103"),
+    ]
+    disp = detect_displacement(win, "FVG", atr=Decimal("2"), cfg=_CfgStub())
+    assert disp is not None and disp.type == "FVG_BULL"
+
+
+def test_detect_displacement_true_gap_deferred():
+    win = [_candle(1, 10, 0, "9.5")]
+    assert detect_displacement(win, "TRUE_GAP", atr=Decimal("2"), cfg=_CfgStub()) is None
+
+
+def test_detect_displacement_unknown_model_raises():
+    with pytest.raises(ValueError):
+        detect_displacement([], "NONSENSE", atr=Decimal("2"), cfg=_CfgStub())
