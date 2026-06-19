@@ -1,4 +1,4 @@
-"""Pure 1m->T aggregation. No clock, no I/O, no datetime.now()."""
+"""Pure 1m->T aggregation. No clock, no I/O, no wall-clock calls."""
 from __future__ import annotations
 
 from datetime import datetime, time, timedelta
