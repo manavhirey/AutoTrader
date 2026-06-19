@@ -1,9 +1,13 @@
 import asyncio
+import os
 from datetime import datetime, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from orb_bot.feed import alpaca as feed_alpaca
+from orb_bot.interfaces import DataFeed
 from orb_bot.models import Candle
 
 from .context import orb_bot  # noqa: F401
@@ -288,3 +292,82 @@ async def test_backfill_or_empty_bars_returns_empty_list():
         end=datetime(2026, 6, 19, 9, 45, tzinfo=ET),
     )
     assert candles == []
+
+
+# ---------------------------------------------------------------------------
+# Task 24: DataFeed Protocol conformance + network-gated SDK smoke tests
+# ---------------------------------------------------------------------------
+
+
+def test_alpaca_feed_satisfies_datafeed_protocol():
+    """AlpacaFeed must be structurally compatible with the DataFeed Protocol.
+
+    DataFeed is @runtime_checkable, so isinstance() performs a structural
+    check: AlpacaFeed must expose candles() and close() with matching
+    signatures. A plain object without those methods must return False.
+    """
+    f = feed_alpaca.AlpacaFeed(
+        api_key="k", secret_key="s", symbol="SPY", feed="IEX",
+    )
+    assert isinstance(f, DataFeed)
+
+    # Negative check: a bare object does NOT satisfy the protocol.
+    assert not isinstance(object(), DataFeed)
+
+
+def test_stockdatastream_exposes_pinned_sdk_surface():
+    """Version-pin guard: assert the installed alpaca-py still exposes the
+    three semi-internal methods the §13 lifecycle workaround depends on.
+
+    Runs unconditionally (no creds required — inspects the class, not a live
+    stream). If an SDK upgrade renames these, this test fails immediately.
+    """
+    from alpaca.data.live.stock import StockDataStream
+
+    assert hasattr(StockDataStream, "subscribe_bars"), (
+        "alpaca-py removed StockDataStream.subscribe_bars — update §13 adapter"
+    )
+    assert hasattr(StockDataStream, "_run_forever"), (
+        "alpaca-py removed StockDataStream._run_forever — update §13 adapter"
+    )
+    assert hasattr(StockDataStream, "stop_ws"), (
+        "alpaca-py removed StockDataStream.stop_ws — update §13 adapter"
+    )
+
+
+_NO_CREDS = not (os.getenv("ALPACA_KEY") and os.getenv("ALPACA_SECRET"))
+
+
+@pytest.mark.skipif(_NO_CREDS, reason="paper smoke test needs ALPACA_KEY/ALPACA_SECRET")
+def test_real_stockdatastream_exposes_pinned_sdk_surface():
+    """Network-gated: build a live StockDataStream with real creds and verify
+    the §13 lifecycle methods exist on the instantiated object (not just the
+    class). Skipped when ALPACA_KEY/ALPACA_SECRET are absent.
+    """
+    from alpaca.data.enums import DataFeed as SDKDataFeed
+    from alpaca.data.live.stock import StockDataStream
+
+    stream = StockDataStream(
+        os.environ["ALPACA_KEY"], os.environ["ALPACA_SECRET"], feed=SDKDataFeed.IEX,
+    )
+    assert hasattr(stream, "subscribe_bars")
+    assert hasattr(stream, "_run_forever")
+    assert hasattr(stream, "stop_ws")
+
+
+@pytest.mark.skipif(_NO_CREDS, reason="paper smoke test needs ALPACA_KEY/ALPACA_SECRET")
+async def test_real_hist_tf_returns_candles():
+    """Network-gated: call hist_tf against the real IEX endpoint to verify the
+    REST path works end-to-end. Skipped when ALPACA_KEY/ALPACA_SECRET are absent.
+    """
+    f = feed_alpaca.AlpacaFeed(
+        api_key=os.environ["ALPACA_KEY"],
+        secret_key=os.environ["ALPACA_SECRET"],
+        symbol="SPY",
+        feed="IEX",
+    )
+    from datetime import datetime as _dt
+
+    candles = await f.hist_tf(limit=5, tf_min=15, end=_dt.now(ET))
+    assert len(candles) >= 1
+    assert all(c.timeframe_min == 15 for c in candles)
