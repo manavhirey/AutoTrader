@@ -1,0 +1,107 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "orb-bot"
+version = "0.1.0"
+description = "ORB → Alpaca trading bot: single-timeframe Opening Range Breakout strategy with a pure, deterministic engine."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "ORB Bot Authors" }]
+keywords = ["trading", "alpaca", "opening-range-breakout", "orb", "asyncio"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "alpaca-py>=0.43,<0.44",
+    "discord.py>=2.6,<3",
+    "pydantic>=2",
+    "pydantic-settings",
+    "pyyaml",
+    "python-dotenv",
+    "structlog",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio",
+    "pytest-cov",
+    "freezegun",
+    "ruff",
+    "mypy",
+    "import-linter",
+]
+
+[project.scripts]
+orb-bot = "orb_bot.__main__:main"
+
+[tool.setuptools]
+# Flat layout (Hitchhiker's Guide): the package lives at the repo root, NOT in src/.
+packages = [
+    "orb_bot",
+    "orb_bot.feed",
+    "orb_bot.execution",
+    "orb_bot.approval",
+    "orb_bot.reporting",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["orb_bot", "tests"]
+
+[tool.ruff.lint]
+# E/F = pyflakes+pycodestyle, I = isort, UP = pyupgrade, B = bugbear, W = warnings.
+select = ["E", "F", "I", "UP", "B", "W"]
+ignore = []
+
+[tool.ruff.lint.isort]
+known-first-party = ["orb_bot"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+check_untyped_defs = true
+ignore_missing_imports = true
+files = ["orb_bot"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.coverage.run]
+branch = true
+source = ["orb_bot"]
+
+# --- Purity boundary, enforced by import-linter (run via `lint-imports`) ---
+[tool.importlinter]
+root_package = "orb_bot"
+
+[[tool.importlinter.contracts]]
+name = "Pure modules import nothing from I/O layers"
+type = "forbidden"
+source_modules = [
+    "orb_bot.models",
+    "orb_bot.aggregation",
+    "orb_bot.indicators",
+    "orb_bot.engine",
+]
+forbidden_modules = [
+    "orb_bot.feed",
+    "orb_bot.execution",
+    "orb_bot.approval",
+    "orb_bot.reporting",
+    "orb_bot.orchestrator",
+    "orb_bot.discordbot",
+]
