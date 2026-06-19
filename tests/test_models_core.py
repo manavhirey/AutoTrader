@@ -5,7 +5,6 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from .context import orb_bot
 from orb_bot import models
 
 ET = ZoneInfo("America/New_York")

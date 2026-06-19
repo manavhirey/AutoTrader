@@ -2,7 +2,6 @@
 from datetime import time
 from decimal import Decimal
 
-from .context import orb_bot
 from orb_bot.config import RunConfig, StrategyConfig
 
 
