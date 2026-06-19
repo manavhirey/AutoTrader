@@ -19,6 +19,7 @@ from orb_bot.models import (
     OrderResult,
     Setup,
     SetupProposed,
+    TradeResult,
 )
 
 ET = ZoneInfo("America/New_York")
@@ -975,3 +976,109 @@ async def test_flatten_eod_flatten_runs_even_if_cancel_all_raises():
     await o._flatten_eod()
     assert broker.cancel_all_calls == 1, "cancel_all must be attempted"
     assert broker.flatten_calls == 1, "flatten must run despite cancel_all raising"
+
+
+# ---------------------------------------------------------------------------
+# Task 43: _build_session_summary + _emit_session_report (once-only)
+# ---------------------------------------------------------------------------
+
+
+async def test_build_session_summary_tallies_win_loss_breakeven():
+    broker = FakeBroker(equity=Decimal("100050"))
+    o = _make_orch(broker)
+    o.start_equity = Decimal("100000")
+    o.trades = [
+        TradeResult(Direction.LONG, Model.BREAKOUT, 10, Decimal("100"), Decimal("102"),
+                    Decimal("20.00"), Decimal("20.00") / Decimal("100000"), "TARGET"),
+        TradeResult(Direction.LONG, Model.BREAKOUT, 10, Decimal("100"), Decimal("99"),
+                    Decimal("-10.00"), Decimal("-10.00") / Decimal("100000"), "STOP"),
+        TradeResult(Direction.LONG, Model.BREAKOUT, 10, Decimal("100"), Decimal("100"),
+                    Decimal("0.00"), Decimal("0"), "FLATTEN"),
+    ]
+    summary = await o._build_session_summary()
+    assert summary.wins == 1
+    assert summary.losses == 1
+    assert summary.breakevens == 1
+    assert summary.wins + summary.losses + summary.breakevens == len(summary.trades)
+    assert summary.total_pnl == Decimal("10.00")
+    assert summary.total_pnl_pct == Decimal("10.00") / Decimal("100000")
+    assert summary.start_equity == Decimal("100000")
+    assert summary.end_equity == Decimal("100050")
+    assert summary.mode == "PAPER"
+    assert summary.symbol == "AAPL"
+    assert summary.no_trade_reason is None
+
+
+async def test_build_session_summary_no_trade_reason_window_expired():
+    broker = FakeBroker(equity=Decimal("100000"))
+    o = _make_orch(broker)
+    o.start_equity = Decimal("100000")
+    o.trades = []
+    o.engine._done = True
+    o._terminal_reason = "window expired"
+    summary = await o._build_session_summary()
+    assert summary.trades == []
+    assert summary.total_pnl == Decimal("0")
+    assert summary.no_trade_reason == "window expired"
+
+
+async def test_emit_session_report_fires_once():
+    broker = FakeBroker()
+    reporter = FakeReporter()
+    o = _make_orch(broker, reporter=reporter)
+    o.start_equity = Decimal("100000")
+    o.trades = []
+    await o._emit_session_report()
+    await o._emit_session_report()  # must NOT double-report
+    assert len(reporter.session_reports) == 1
+
+
+async def test_build_session_summary_market_closed_no_start_equity():
+    # Locks the summary.py guard relaxation: no-trade, start_equity=None (→ 0) must NOT crash.
+    broker = FakeBroker(equity=Decimal("0"))
+    o = _make_orch(broker)
+    o.start_equity = None
+    o.trades = []
+    o._terminal_reason = "market closed"
+    summary = await o._build_session_summary()
+    assert summary.no_trade_reason == "market closed"
+    assert summary.total_pnl == Decimal("0")
+    assert summary.total_pnl_pct == Decimal("0")
+
+
+# ---------------------------------------------------------------------------
+# Task 43 code+security review fixes
+# ---------------------------------------------------------------------------
+
+
+async def test_build_session_summary_get_account_failure_fallback():
+    # Fix C: if get_account raises in _build_session_summary, end_equity falls back
+    # to start_equity (not None), and the report still emits without crashing.
+    class RaisingAccountBroker(FakeBroker):
+        async def get_account(self):
+            raise OSError("network timeout")
+
+    broker = RaisingAccountBroker()
+    reporter = FakeReporter()
+    o = _make_orch(broker, reporter=reporter)
+    o.start_equity = Decimal("100000")
+    o.trades = []
+    # Must not raise
+    summary_obj = await o._build_session_summary()
+    assert summary_obj.end_equity == Decimal("100000")
+    # Report should also emit without crashing
+    await o._emit_session_report()
+    assert len(reporter.session_reports) == 1
+
+
+async def test_react_window_expired_sets_terminal_reason():
+    # Fix A: WindowExpired must set _terminal_reason = "window expired" so
+    # the no-trade session report shows the right reason, not the default.
+    from orb_bot.models import WindowExpired
+
+    broker = FakeBroker()
+    o = _make_orch(broker)
+    o.trades = []
+    await o._react(WindowExpired())
+    summary_obj = await o._build_session_summary()
+    assert summary_obj.no_trade_reason == "window expired"

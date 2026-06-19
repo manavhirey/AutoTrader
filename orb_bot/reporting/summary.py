@@ -77,10 +77,10 @@ def build_session_summary(
     pnl>0 win, pnl<0 loss, pnl==0 breakeven, so wins+losses+breakevens == len(trades).
     No-trade case ⇒ $0.00 totals and no_trade_reason set by the caller.
     """
-    if start_equity <= 0:
-        raise ValueError("start_equity must be positive")
     total_pnl = sum((t.pnl for t in trades), Decimal("0"))
     if trades:
+        if start_equity <= 0:
+            raise ValueError("start_equity must be positive")
         # total_pnl_pct is recomputed from per-trade totals, NOT the sum of individual trade pnl_pct
         total_pnl_pct = total_pnl / start_equity
     else:

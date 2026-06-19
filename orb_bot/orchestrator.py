@@ -24,6 +24,7 @@ from orb_bot.models import (
     OrderResult,
     RangeDayDetected,
     RangeEstablished,
+    SessionSummary,
     Setup,
     SetupProposed,
     TradeRecorded,
@@ -70,6 +71,8 @@ class Orchestrator:
         self.flatten_coid: str | None = None
         self.trade_seq: int = 1
         self._stop = asyncio.Event()
+        self._reported = False
+        self._terminal_reason: str | None = None
 
         run_id = f"{self.clock.now().date().isoformat()}-{self.symbol}"
         self.log = logconf.configure_logging(
@@ -273,6 +276,7 @@ class Orchestrator:
             return
         if isinstance(ev, WindowExpired):
             self.log.info("window_expired")
+            self._terminal_reason = "window expired"
             return
         if isinstance(ev, TradeRecorded):
             self.log.info(
@@ -489,3 +493,43 @@ class Orchestrator:
             self.log.warning("flatten_cancel_failed", error=type(exc).__name__)
         # ALWAYS flatten — the critical EOD safety action (idempotent)
         await self.broker.flatten()
+
+    def _no_trade_reason(self) -> str | None:
+        if self.trades:
+            return None
+        if self._terminal_reason:
+            return self._terminal_reason
+        return "no confirmed breakout/entry"
+
+    async def _build_session_summary(self) -> SessionSummary:
+        # Only fetch end_equity + delegate the tallying to the pure builder
+        # (spec §17a) so the orchestrator does not re-implement P/L logic (HIGH #5).
+        try:
+            acct = await self.broker.get_account()
+            self.end_equity = acct.equity
+        except Exception:  # noqa: BLE001 - report must still emit
+            self.end_equity = self.start_equity or Decimal("0")
+        return summary.build_session_summary(
+            trades=self.trades,
+            start_equity=self.start_equity if self.start_equity is not None else Decimal("0"),
+            end_equity=self.end_equity if self.end_equity is not None else Decimal("0"),
+            mode=self.mode,
+            symbol=self.symbol,
+            session_date=self.clock.now().date(),
+            no_trade_reason=self._no_trade_reason(),
+        )
+
+    async def _emit_session_report(self) -> None:
+        if self._reported:
+            return
+        summary_obj = await self._build_session_summary()
+        self.log.info(
+            "session_report",
+            total_pnl=str(summary_obj.total_pnl),
+            wins=summary_obj.wins,
+            losses=summary_obj.losses,
+            breakevens=summary_obj.breakevens,
+            no_trade_reason=summary_obj.no_trade_reason,
+        )
+        await self.reporter.session_report(summary_obj)
+        self._reported = True

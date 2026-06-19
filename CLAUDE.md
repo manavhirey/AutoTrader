@@ -189,6 +189,12 @@ write-ups live in the `.superpowers/sdd/progress.md` roll-up. (Beyond this list,
   `get_order_by_client_id` primitive the CRITICAL reconciliation item needs) to decide adopt-vs-cancel. *(Found: T40 security review.)*
 
 ### Resolved-during-build findings log (audit trail; fixed in the named commit)
+- [x] **[T43 session report] builder + once-only emit hardening.** Relaxed the pure `build_session_summary` guard to
+  reject `start_equity<=0` only when trades exist (no-trade/market-closed start_equity=0 → 0% return, no crash — closes
+  the T38 start_equity-None concern for the report path). Fixed: `_react(WindowExpired)` now sets the `"window expired"`
+  no-trade reason (was always the default); `_emit_session_report` sets `_reported=True` only AFTER a successful report
+  (a failed report can retry); end_equity/start_equity None-handling. +get_account-failure & window-expired tests.
+  Fixed in T43 commit. (DiscordReporter `opening_range` stash + EOD partial-close reconcile remain backlog.)
 - [x] **[T42 flatten] EOD close always flattens.** Review (HIGH): if `cancel_all()` raised, `flatten()` never ran →
   position held open at EOD. Now `cancel_all` is best-effort (try/except + log) and `flatten` always runs (the critical
   EOD safety action); a `flatten` failure still propagates. +test (cancel raises → flatten still runs). Fixed in T42 commit.
