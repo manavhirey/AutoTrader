@@ -94,3 +94,8 @@ def is_strong_close(
     else:
         loc_ok = ((c.high - c.close) / rng) >= location_d
     return bool(body_ok and loc_ok)
+
+
+def within(c: Candle, level: Decimal, tol: Decimal) -> bool:
+    """Spec §12: candle range touches the [level-tol, level+tol] band (inclusive)."""
+    return c.low <= level + tol and c.high >= level - tol

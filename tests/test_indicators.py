@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from orb_bot.indicators import ATR, is_strong_close
+from orb_bot.indicators import ATR, is_strong_close, within
 from orb_bot.models import Candle, Direction
 
 ET = ZoneInfo("America/New_York")
@@ -123,3 +123,37 @@ def test_is_strong_close_boundary_inclusive():
     # loc=(7-0)/10=0.70 -> inclusive True
     c = _candle(1, 10, 0, 7)
     assert is_strong_close(c, Direction.LONG, 0.60, 0.70) is True
+
+
+def test_within_contains_level():
+    c = _candle(99, 101, 98, 100)  # low=98, high=101
+    assert within(c, Decimal("100"), Decimal("0.25")) is True
+
+
+def test_within_upper_boundary_inclusive():
+    # candle entirely below band; high exactly == level - tol -> inclusive True
+    c = _candle("99.5", "99.75", "99.0", "99.6")  # high=99.75
+    assert within(c, Decimal("100"), Decimal("0.25")) is True  # level-tol=99.75
+
+
+def test_within_lower_boundary_inclusive():
+    # candle entirely above band; low exactly == level + tol -> inclusive True
+    c = _candle("100.30", "100.50", "100.25", "100.40")  # low=100.25
+    assert within(c, Decimal("100"), Decimal("0.25")) is True  # level+tol=100.25
+
+
+def test_within_miss_above():
+    c = _candle("100.40", "100.60", "100.30", "100.50")  # low=100.30 > 100.25
+    assert within(c, Decimal("100"), Decimal("0.25")) is False
+
+
+def test_within_miss_below():
+    c = _candle("99.40", "99.70", "99.30", "99.60")  # high=99.70 < 99.75
+    assert within(c, Decimal("100"), Decimal("0.25")) is False
+
+
+def test_within_zero_tol():
+    c = _candle("99.9", "100.0", "99.8", "99.95")  # high=100 touches level exactly
+    assert within(c, Decimal("100"), Decimal("0")) is True
+    c2 = _candle("99.9", "99.99", "99.8", "99.95")  # high<level, low<level
+    assert within(c2, Decimal("100"), Decimal("0")) is False
