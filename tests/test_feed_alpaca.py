@@ -183,3 +183,108 @@ async def test_candles_terminates_after_close():
     # The sentinel terminates the iterator; the one bar is drained first.
     assert len(collected) == 1
     assert collected[0].close == Decimal("99.0")
+
+
+# ---------------------------------------------------------------------------
+# Task 23: historical REST tests (hist_tf / backfill_or)
+# ---------------------------------------------------------------------------
+
+
+class FakeBarSet:
+    def __init__(self, symbol, bars):
+        self.data = {symbol: bars}
+
+
+class FakeHistClient:
+    """Stand-in for alpaca-py StockHistoricalDataClient.get_stock_bars."""
+
+    def __init__(self, symbol, bars):
+        self._barset = FakeBarSet(symbol, bars)
+        self.last_request = None
+
+    def get_stock_bars(self, request):
+        self.last_request = request
+        return self._barset
+
+
+async def test_hist_tf_returns_tf_candles_oldest_to_newest():
+    # Two 15m bars (UTC timestamps); SDK returns them oldest-first.
+    bars = [
+        FakeBar("SPY", datetime(2026, 6, 19, 13, 0, tzinfo=UTC), 10, 11, 9, 10.5, 1000),
+        FakeBar("SPY", datetime(2026, 6, 19, 13, 15, tzinfo=UTC), 10.5, 12, 10, 11.5, 2000),
+    ]
+    hist = FakeHistClient("SPY", bars)
+    f = feed_alpaca.AlpacaFeed(
+        api_key="k", secret_key="s", symbol="SPY", feed="IEX",
+        hist_factory=lambda **_: hist,
+    )
+
+    async def fake_get_bars(*, tf_min, start, end, limit):
+        return hist.get_stock_bars(object()).data["SPY"]
+
+    f._get_bars = fake_get_bars
+    end = datetime(2026, 6, 19, 9, 30, tzinfo=ET)
+    candles = await f.hist_tf(limit=2, tf_min=15, end=end)
+
+    assert [c.timeframe_min for c in candles] == [15, 15]
+    assert [c.close for c in candles] == [Decimal("10.5"), Decimal("11.5")]
+    # ts_close = ts_open + tf_min for T-bars
+    assert candles[0].ts_close == candles[0].ts_open + timedelta(minutes=15)
+
+
+async def test_backfill_or_returns_1m_candles_in_window():
+    bars = [
+        FakeBar("SPY", datetime(2026, 6, 19, 13, 30, tzinfo=UTC), 1, 1, 1, 1, 1),
+        FakeBar("SPY", datetime(2026, 6, 19, 13, 31, tzinfo=UTC), 2, 2, 2, 2, 2),
+    ]
+    hist = FakeHistClient("SPY", bars)
+    f = feed_alpaca.AlpacaFeed(
+        api_key="k", secret_key="s", symbol="SPY", feed="IEX",
+        hist_factory=lambda **_: hist,
+    )
+
+    async def fake_get_bars(*, tf_min, start, end, limit):
+        return hist.get_stock_bars(object()).data["SPY"]
+
+    f._get_bars = fake_get_bars
+    start = datetime(2026, 6, 19, 9, 30, tzinfo=ET)
+    end = datetime(2026, 6, 19, 9, 45, tzinfo=ET)
+    candles = await f.backfill_or(start=start, end=end)
+
+    assert [c.timeframe_min for c in candles] == [1, 1]
+    assert candles[0].ts_open == datetime(2026, 6, 19, 9, 30, tzinfo=ET)
+    assert candles[1].ts_open == datetime(2026, 6, 19, 9, 31, tzinfo=ET)
+    assert candles[0].ts_close == candles[0].ts_open + timedelta(minutes=1)
+
+
+async def test_hist_tf_empty_bars_returns_empty_list():
+    hist = FakeHistClient("SPY", [])
+    f = feed_alpaca.AlpacaFeed(
+        api_key="k", secret_key="s", symbol="SPY", feed="IEX",
+        hist_factory=lambda **_: hist,
+    )
+
+    async def fake_get_bars(*, tf_min, start, end, limit):
+        return []
+
+    f._get_bars = fake_get_bars
+    candles = await f.hist_tf(limit=5, tf_min=15, end=datetime(2026, 6, 19, 9, 30, tzinfo=ET))
+    assert candles == []
+
+
+async def test_backfill_or_empty_bars_returns_empty_list():
+    hist = FakeHistClient("SPY", [])
+    f = feed_alpaca.AlpacaFeed(
+        api_key="k", secret_key="s", symbol="SPY", feed="IEX",
+        hist_factory=lambda **_: hist,
+    )
+
+    async def fake_get_bars(*, tf_min, start, end, limit):
+        return []
+
+    f._get_bars = fake_get_bars
+    candles = await f.backfill_or(
+        start=datetime(2026, 6, 19, 9, 30, tzinfo=ET),
+        end=datetime(2026, 6, 19, 9, 45, tzinfo=ET),
+    )
+    assert candles == []
