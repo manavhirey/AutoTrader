@@ -118,7 +118,25 @@ write-ups live in the `.superpowers/sdd/progress.md` roll-up. (Beyond this list,
   (intentional for single-symbol). Drop the unused second arg or document why it's retained (future multi-symbol).
   *(Found: T29 review; Task 25 code.)*
 
+- [ ] **[MED-sec] Pin the Discord approval channel to a known guild.** `resolve_channel` now validates the
+  channel is messageable, but does NOT verify it belongs to the intended private server. Add a `DISCORD_GUILD_ID`
+  config field and assert `ch.guild.id == expected` so the money-approval UI can't be redirected to an
+  attacker-influenced/misconfigured `channel_id`. Pair with restricting the bot's OAuth invite to that one server.
+  *(Found: T31 security review; needs a config field.)*
+- [ ] **[MED] DiscordApprover (Task 33) MUST fail closed.** Hard-bound `request()` with `approval_timeout_s`,
+  and treat `DiscordClient.is_ready == False` / any send failure as a NON-approval (never auto-approve a trade
+  because the channel is dead). The `is_ready` liveness property now exists for this. *(Found: T31 security review;
+  requirement for Task 33.)*
+- [ ] **[LOW-ops] Restrict the bot's OAuth invite to the single intended Discord server** so the `guilds` intent
+  can't broaden visibility if the bot is added elsewhere. Deployment/operational, not code. *(Found: T31 review.)*
+
 ### Resolved-during-build findings log (audit trail; fixed in the named commit)
+- [x] **[T31 High + hardening] DiscordClient startup/fail-closed.** `start_in_background` no longer hangs forever on
+  a failed `bot.start()` (bad token/network) — it races readiness against task completion and re-raises the start
+  error; a crashed background task is now logged via a done-callback; `resolve_channel` validates the channel is
+  messageable and raises (removed the `# type: ignore`); `close()` narrowed to log instead of swallow; added an
+  `is_ready` liveness property and dropped the token reference after start. +start-failure & non-messageable tests.
+  Fixed in T31 commit.
 - [x] **[T29 High×3 + robustness] `_on_trade_update` real-SDK-boundary + stream-survival.** `side=str(enum)` →
   `'OrderSide.BUY'` (now `.value`); `int(filled_qty)`/`int(position_qty)` crashed on float-shaped strings (now
   `Decimal`-coerced); event-enum `str()` mismatch (now `.value`-normalized); `Decimal(str(None))` price crash
