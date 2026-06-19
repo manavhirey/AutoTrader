@@ -69,8 +69,10 @@ class AlpacaFeed:
         """SDK callback: convert a 1m Bar and enqueue it for candles()."""
         await self._queue.put(_bar_to_candle(bar))
 
-    async def candles(self) -> AsyncIterator[Candle]:  # type: ignore[override]
+    def candles(self) -> AsyncIterator[Candle]:
         """Drain the queue, yielding 1m transport Candles in FIFO order."""
-        while True:
-            candle = await self._queue.get()
-            yield candle
+        async def _drain():
+            while True:
+                candle = await self._queue.get()
+                yield candle
+        return _drain()
