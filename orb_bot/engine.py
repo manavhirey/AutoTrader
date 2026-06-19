@@ -377,6 +377,13 @@ class Engine:
         return [m.NoOp()]
 
     def _on_candle_wait_entry(self, c: Candle) -> list[m.EngineEvent]:
+        # Window guard FIRST: never act after trading_window_min (sec.9 guardrail).
+        # A past-window candle must not buffer, advance the retest wait, or build
+        # an entry -- the early return prevents all of it (mirrors WAIT_CONFIRMATION).
+        if self._past_window(c):
+            self.ctx.state = State.DONE
+            self.ctx.last_ts = c.ts_close
+            return [m.WindowExpired()]
         # Buffer this candle into the entry window (capped to swing_lookback so
         # find_swing/detect_displacement only see the relevant recent bars), then
         # attempt an entry. This is the single source of truth for entry-window

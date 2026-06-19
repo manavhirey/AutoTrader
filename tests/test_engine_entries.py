@@ -309,3 +309,32 @@ def test_on_candle_wait_entry_buffers_candle(monkeypatch):
     e.on_candle(candle)
     assert e.ctx.entry_window[-1] is candle
     assert e.ctx.last_ts == candle.ts_close
+
+
+def test_wait_entry_past_window_expires_no_setup_proposed():
+    # sec.9 guardrail #1 / sec.4 top-of-loop: never act after trading_window_min.
+    # Reach WAIT_ENTRY via the NORMAL confirm path, then feed a WAIT_ENTRY candle
+    # whose ts_close is past session_open + trading_window_min: the engine must
+    # emit WindowExpired, go DONE, propose NO setup, and NOT advance retest_wait.
+    cfg = _cfg(enable_breakout=True, enable_retest=True, trading_window_min=120)
+    e = eng.Engine(cfg, date(2026, 6, 19))
+    # 09:30 range candle -> WAIT_CONFIRMATION
+    e.on_candle(_mk_candle(100, 105, 98, 102, 0))
+    # 09:45 strong close above OR high (105) -> confirm LONG -> WAIT_ENTRY
+    e.on_candle(_mk_candle(105.5, 108.2, 105.0, 108.0, 15))
+    assert e.ctx.state is State.WAIT_ENTRY
+    assert e.ctx.direction is Direction.LONG
+    wait_before = e.ctx.retest_wait
+    window_len = len(e.ctx.entry_window)
+    # window closes at 09:30 + 120min = 11:30; the 11:15 candle closes at 11:30.
+    past_candle = _mk_candle(106, 107, 105.5, 106.5, 105)
+    assert past_candle.ts_close >= datetime(2026, 6, 19, 11, 30, tzinfo=ET)
+    evs = e.on_candle(past_candle)
+    assert any(isinstance(ev, orb_bot.models.WindowExpired) for ev in evs)
+    assert all(not isinstance(ev, orb_bot.models.SetupProposed) for ev in evs)
+    assert e.ctx.state is State.DONE
+    assert e.is_done() is True
+    assert e.ctx.last_ts == past_candle.ts_close
+    # past-window candle did NOT buffer or advance the retest wait counter.
+    assert e.ctx.retest_wait == wait_before
+    assert len(e.ctx.entry_window) == window_len
