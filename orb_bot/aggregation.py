@@ -39,6 +39,12 @@ class Aggregator:
         self._children: list[Candle] = []        # 1m bars in the open bucket
         self._seen_opens: set[datetime] = set()  # ts_open dedupe for the open bucket
 
+    def bucket_start(self, ts: datetime) -> datetime:
+        """Start of the ``tf_min`` bucket containing ``ts`` (this aggregator's
+        timeframe + anchor). Thin instance wrapper over the module function so
+        callers can ask the configured aggregator without re-threading params."""
+        return bucket_start(ts, self.tf_min, self.anchor)
+
     def add(self, one_min: Candle) -> Candle | None:
         """Add a 1m bar; emit the prior closed aggregate when the bucket advances."""
         b = bucket_start(one_min.ts_open, self.tf_min, self.anchor)

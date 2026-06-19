@@ -1082,3 +1082,240 @@ async def test_react_window_expired_sets_terminal_reason():
     await o._react(WindowExpired())
     summary_obj = await o._build_session_summary()
     assert summary_obj.no_trade_reason == "window expired"
+
+
+# ---------------------------------------------------------------------------
+# Task 44: run() lifecycle loop (drain feed → aggregate → engine.on_candle →
+# react), boundary force_close, trade-updates drain, graceful shutdown
+# ---------------------------------------------------------------------------
+
+
+async def test_run_paper_full_cycle_submits_and_reports():
+    # 1m candles for two 15m buckets; FakeEngine emits SetupProposed on the
+    # candle index where the second 15m bucket closes.
+    one_min = []
+    base = datetime.datetime(2026, 6, 19, 9, 30, tzinfo=ET)
+    for i in range(31):  # 09:30..10:00 -> closes 09:45 and 10:00 buckets
+        ts = base + datetime.timedelta(minutes=i)
+        one_min.append(
+            Candle(ts_open=ts, ts_close=ts + datetime.timedelta(minutes=1),
+                   open=Decimal("100"), high=Decimal("101"), low=Decimal("99"),
+                   close=Decimal("100"), volume=5, timeframe_min=1)
+        )
+    feed = FakeFeed(one_min)
+    broker = FakeBroker(equity=Decimal("100000"))
+    approver = FakeApprover(decision="APPROVE")
+    reporter = FakeReporter()
+    # engine emits SetupProposed on the 2nd aggregated 15m candle (index 1)
+    engine = FakeEngine(events_by_index={1: [SetupProposed(setup=_setup_long())]})
+    clk = FixedClock(datetime.datetime(2026, 6, 19, 9, 20, tzinfo=ET))
+    o = orch_mod.Orchestrator(_settings(), feed, broker, approver, reporter, clk, engine)
+    _or_set(o)
+    await o.run()
+    assert approver.started and reporter.started
+    assert len(broker.submitted) == 1
+    assert len(reporter.session_reports) == 1
+    assert feed.closed and approver.closed and reporter.closed
+
+
+async def test_run_market_closed_skips_loop_but_reports_with_start_equity():
+    feed = FakeFeed([])
+    broker = FakeBroker(is_open=False)
+    reporter = FakeReporter()
+    clk = FixedClock(datetime.datetime(2026, 6, 19, 9, 20, tzinfo=ET))
+    o = orch_mod.Orchestrator(
+        _settings(), feed, broker, FakeApprover(), reporter, clk, FakeEngine()
+    )
+    await o.run()
+    # market closed → no submit; session_report not emitted (no start_equity captured)
+    assert broker.submitted == []
+    assert reporter.session_reports == []
+
+
+async def test_run_boundary_timer_force_closes_missing_minute_bucket():
+    # HIGH #7: a bucket whose minutes are missing must still emit via force_close.
+    # Feed a single 1m candle near a 15m boundary, then assert the engine saw a
+    # force-closed T-candle.
+    base = datetime.datetime(2026, 6, 19, 9, 30, tzinfo=ET)
+    one_min = [
+        Candle(ts_open=base, ts_close=base + datetime.timedelta(minutes=1),
+               open=Decimal("100"), high=Decimal("101"), low=Decimal("99"),
+               close=Decimal("100"), volume=5, timeframe_min=1)
+    ]
+    feed = FakeFeed(one_min)
+    broker = FakeBroker(equity=Decimal("100000"))
+    engine = FakeEngine()
+    # clock is past the 09:45 boundary + grace so the timer fires for the 09:30 bucket
+    clk = FixedClock(datetime.datetime(2026, 6, 19, 9, 46, tzinfo=ET))
+    o = orch_mod.Orchestrator(
+        _settings(), feed, broker, FakeApprover(), FakeReporter(), clk, engine
+    )
+    await o.run()
+    # the single 1m candle did not advance the bucket, so force_close emitted the
+    # partial 09:30 T-candle which the engine received.
+    assert len(engine.candles) >= 1
+
+
+async def test_run_stops_on_engine_done():
+    one_min = []
+    base = datetime.datetime(2026, 6, 19, 9, 30, tzinfo=ET)
+    for i in range(16):
+        ts = base + datetime.timedelta(minutes=i)
+        one_min.append(
+            Candle(ts_open=ts, ts_close=ts + datetime.timedelta(minutes=1),
+                   open=Decimal("100"), high=Decimal("100"), low=Decimal("100"),
+                   close=Decimal("100"), volume=1, timeframe_min=1)
+        )
+    feed = FakeFeed(one_min)
+    broker = FakeBroker(equity=Decimal("100000"))
+    engine = FakeEngine()
+    engine._done = True  # done immediately after first aggregated candle
+    clk = FixedClock(datetime.datetime(2026, 6, 19, 9, 20, tzinfo=ET))
+    o = orch_mod.Orchestrator(
+        _settings(), feed, broker, FakeApprover(), FakeReporter(), clk, engine
+    )
+    await o.run()
+    assert len(o.reporter.session_reports) == 1
+
+
+# ---------------------------------------------------------------------------
+# Task 44 code+security review fixes (money-safety): entry-fill race, abnormal-
+# exit fail-safe flatten, boundary off-by-one
+# ---------------------------------------------------------------------------
+
+
+async def test_setup_proposed_arms_pending_entry_qty_before_submit():
+    # Fix A (entry-fill race): _pending_entry_qty must be armed to qty BEFORE
+    # submit_bracket is awaited, so a fast ENTRY fill arriving on the drain DURING
+    # the submit await still flips to IN_TRADE (never a lost entry transition).
+    class AssertingBroker(FakeBroker):
+        def __init__(self, orch_ref, **kwargs):
+            super().__init__(**kwargs)
+            self._orch_ref = orch_ref
+            self.armed_at_submit = None
+
+        async def submit_bracket(self, setup, qty):
+            # Capture the guard state at the instant of submit (it must already
+            # equal qty — armed BEFORE the await, not after).
+            self.armed_at_submit = self._orch_ref[0]._pending_entry_qty
+            return await super().submit_bracket(setup, qty)
+
+    box = []
+    broker = AssertingBroker(box, equity=Decimal("100000"))
+    o = _make_orch(broker, approver=FakeApprover(decision="APPROVE"))
+    box.append(o)
+    o.start_equity = Decimal("100000")
+    _or_set(o)
+    await o._react(SetupProposed(setup=_setup_long()))
+    assert len(broker.submitted) == 1
+    sub_qty = broker.submitted[0][1]
+    assert sub_qty == 500
+    assert broker.armed_at_submit == 500, "guard must be armed BEFORE submit await"
+    assert o._pending_entry_qty == 500
+
+
+async def test_run_entry_fill_via_drain_fires_on_entry_filled():
+    # Fix A end-to-end: an ENTRY fill (position_qty == qty) delivered on the
+    # trade-updates drain must route to engine.on_entry_filled (guard armed).
+    import asyncio as _asyncio
+
+    class YieldingFeed(FakeFeed):
+        async def candles(self):
+            # Yield control between bars so the drain task (same loop) gets a turn
+            # to deliver the ENTRY fill before run() finishes and cancels it.
+            base = datetime.datetime(2026, 6, 19, 9, 30, tzinfo=ET)
+            for i in range(16):
+                ts = base + datetime.timedelta(minutes=i)
+                await _asyncio.sleep(0)
+                yield Candle(
+                    ts_open=ts, ts_close=ts + datetime.timedelta(minutes=1),
+                    open=Decimal("100"), high=Decimal("101"), low=Decimal("99"),
+                    close=Decimal("100"), volume=5, timeframe_min=1,
+                )
+
+    feed = YieldingFeed([])
+
+    class EntryFillBroker(FakeBroker):
+        async def trade_updates(self):
+            yield Fill(
+                order_id="o-ENTRY",
+                client_order_id="2026-06-19-AAPL-1-ENTRY",
+                leg_role="ENTRY",
+                side="buy",
+                price=Decimal("100.00"),
+                qty=10,
+                ts=datetime.datetime(2026, 6, 19, 9, 31, tzinfo=ET),
+                position_qty=10,
+                exit_reason=None,
+            )
+            # Keep the stream open so the drain doesn't fall through to its
+            # stream-completed path before the main loop ends.
+            while True:
+                await _asyncio.sleep(0)
+
+    broker = EntryFillBroker(equity=Decimal("100000"))
+    engine = FakeEngine()
+    clk = FixedClock(datetime.datetime(2026, 6, 19, 9, 20, tzinfo=ET))
+    o = orch_mod.Orchestrator(
+        _settings(), feed, broker, FakeApprover(), FakeReporter(), clk, engine
+    )
+    _or_set(o)
+    # Arm the guard as a real submit would (qty matches the fill's position_qty).
+    o._pending_entry_qty = 10
+    await o.run()
+    assert len(engine.entry_fills) == 1, "ENTRY fill on the drain must fire on_entry_filled"
+    assert o.entry_fill is not None
+
+
+async def test_run_failsafe_flattens_open_position_on_feed_crash():
+    # Fix C: a feed that raises mid-stream while a position is OPEN must NOT exit
+    # without flattening — the finally fail-safe flatten runs and the session
+    # report still emits. Fix B keeps teardown reachable even when things go wrong.
+    class CrashingFeed(FakeFeed):
+        def __init__(self, orch_ref):
+            super().__init__([])
+            self._orch_ref = orch_ref
+
+        async def candles(self):
+            # Simulate an in-flight position, then a transport failure mid-stream.
+            self._orch_ref[0].entry_fill = _fill("ENTRY", "buy", 100, 10, position_qty=10)
+            yield _candle_1m(9, 31)
+            raise RuntimeError("feed stream died")
+
+    box = []
+    feed = CrashingFeed(box)
+    broker = FakeBroker(equity=Decimal("100000"))
+    reporter = FakeReporter()
+    engine = FakeEngine()
+    clk = FixedClock(datetime.datetime(2026, 6, 19, 9, 20, tzinfo=ET))
+    o = orch_mod.Orchestrator(
+        _settings(), feed, broker, FakeApprover(), reporter, clk, engine
+    )
+    box.append(o)
+    # run() must not propagate the feed crash without flattening + reporting.
+    with pytest.raises(RuntimeError):
+        await o.run()
+    assert broker.flatten_calls >= 1, "open position must be flattened on abnormal exit"
+    assert len(reporter.session_reports) == 1, "session report must still emit"
+    assert feed.closed and reporter.closed
+
+
+async def test_run_boundary_force_closes_edge_aligned_last_minute_bar():
+    # Fix E (boundary off-by-one): a 1m bar 09:44->09:45 is the LAST minute of the
+    # 09:30 bucket (Aggregator buckets by ts_open=09:44 -> 09:30 bucket). With the
+    # clock past 09:45+grace and the next bucket missing, the boundary must be the
+    # 09:45+grace instant (NOT 10:00+grace), so force_close fires for the 09:30
+    # bucket. Using ts_close (=09:45 -> 09:45 bucket) would compute 10:00+grace and
+    # the timer would NOT fire — proving the ts_open fix.
+    one_min = [_candle_1m(9, 44)]  # ts_open 09:44 -> ts_close 09:45
+    feed = FakeFeed(one_min)
+    broker = FakeBroker(equity=Decimal("100000"))
+    engine = FakeEngine()
+    # 09:46 is past 09:45:03 (grace) but well before 10:00:03.
+    clk = FixedClock(datetime.datetime(2026, 6, 19, 9, 46, tzinfo=ET))
+    o = orch_mod.Orchestrator(
+        _settings(), feed, broker, FakeApprover(), FakeReporter(), clk, engine
+    )
+    await o.run()
+    # force_close emitted the partial 09:30 T-candle the engine received.
+    assert len(engine.candles) >= 1, "edge-aligned last-minute bar must trigger force_close"

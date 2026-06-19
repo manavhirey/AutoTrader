@@ -92,6 +92,13 @@ write-ups live in the `.superpowers/sdd/progress.md` roll-up. (Beyond this list,
   BREAKOUT when `_last_model` is None — true for a restart-adopted position (no `_react` ran). Attribute adopted trades
   with an explicit RECONCILED/UNKNOWN model (or recover the original) so session stats aren't skewed. *(Found: T41 review;
   part of the reconciliation feature.)*
+- [ ] **[CRITICAL] Feed-stall fail-safe — a wall-clock ticker (run loop).** `run()`'s EOD-flatten and shutdown are driven
+  ENTIRELY by `feed.candles()`: if the 1m feed STALLS after `flatten_at` (websocket dies but `anext` just blocks, never
+  raises), the loop never wakes → EOD flatten never fires → the position is **held overnight**, and a SIGINT is observed
+  only lazily (a blocked `anext`/`queue.get` won't see `_stop`). The `finally` fail-safe flatten only triggers on loop
+  EXIT, not a silent stall. Fix: drive the loop off a feed-independent wall-clock ticker — race `anext(feed)` against an
+  `asyncio.sleep`/timeout so each wakeup re-checks `flatten_at`/`_stop` even with no candle (also fixes SIGINT-during-block).
+  *(Found: T44 security review.)*
 - [ ] **[HIGH] Quantize `Setup` stop/target to `tick_size` (engine, pure core).** `engine.py:160`
   `_buffer()` = `max(stop_buffer_ticks*tick, stop_buffer_atr*ATR)`; the ATR term is **not** rounded
   to `tick_size`, so stop/target can be sub-penny. `submit_bracket` forwards them verbatim and
@@ -189,6 +196,13 @@ write-ups live in the `.superpowers/sdd/progress.md` roll-up. (Beyond this list,
   `get_order_by_client_id` primitive the CRITICAL reconciliation item needs) to decide adopt-vs-cancel. *(Found: T40 security review.)*
 
 ### Resolved-during-build findings log (audit trail; fixed in the named commit)
+- [x] **[T44 run loop] capstone async-safety hardening.** Fixed: entry-fill RACE (`_pending_entry_qty`/`_last_model` now
+  armed BEFORE `await submit_bracket`, reset on failure — fast fills were lost); drain-task crash no longer skips teardown
+  (`await updates_task` catches Exception); a **fail-safe flatten** in `finally` flattens any still-open position on ANY
+  exit (crash/SIGINT/engine-bug); `_drain_trade_updates` resilient (per-fill + stream-level guards, sets `_stop` on stream
+  death so the bot doesn't trade blind); boundary force_close off-by-one fixed (uses `ts_open`). +race/fail-safe/boundary
+  tests. Also renamed `self.run`(RunConfig)→`self.run_cfg` (shadowed `run()`), added pure `Aggregator.bucket_start()`.
+  Fixed in T44 commit. (Feed-STALL ticker remains the CRITICAL backlog item above.)
 - [x] **[T43 session report] builder + once-only emit hardening.** Relaxed the pure `build_session_summary` guard to
   reject `start_equity<=0` only when trades exist (no-trade/market-closed start_equity=0 → 0% return, no crash — closes
   the T38 start_equity-None concern for the report path). Fixed: `_react(WindowExpired)` now sets the `"window expired"`
