@@ -21,8 +21,8 @@ classifiers = [
 dependencies = [
     "alpaca-py>=0.43,<0.44",
     "discord.py>=2.6,<3",
-    "pydantic>=2",
-    "pydantic-settings",
+    "pydantic>=2,<3",
+    "pydantic-settings>=2,<3",
     "pyyaml",
     "python-dotenv",
     "structlog",
