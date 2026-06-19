@@ -5,9 +5,16 @@ from __future__ import annotations
 
 from datetime import time
 from decimal import Decimal
+from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic_settings import (
+    BaseSettings,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+    YamlConfigSettingsSource,
+)
 
 
 class StrategyConfig(BaseModel):
@@ -194,3 +201,84 @@ class RunConfig(BaseModel):
                 "live trading requires feed='SIP' (or set allow_live_iex=True to override)"
             )
         return self
+
+
+class Settings(BaseSettings):
+    """Top-level settings: secrets from env/.env, strategy+run from YAML."""
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    # --- secrets (env / .env) — no insecure defaults ---
+    alpaca_key: str = Field(validation_alias="ALPACA_KEY")
+    alpaca_secret: str = Field(validation_alias="ALPACA_SECRET")
+    discord_token: str | None = Field(default=None, validation_alias="DISCORD_TOKEN")
+    discord_channel_id: int | None = Field(
+        default=None, validation_alias="DISCORD_CHANNEL_ID"
+    )
+    discord_approver_user_id: int | None = Field(
+        default=None, validation_alias="DISCORD_APPROVER_USER_ID"
+    )
+
+    # --- nested config (YAML) ---
+    strategy: StrategyConfig = Field(default_factory=StrategyConfig)
+    run: RunConfig
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        # yaml_file is injected via model_config by load_config; read it here
+        yaml_path = settings_cls.model_config.get("yaml_file")
+        sources: list[PydanticBaseSettingsSource] = [
+            init_settings,
+            env_settings,
+            dotenv_settings,
+        ]
+        if yaml_path is not None:
+            sources.append(
+                YamlConfigSettingsSource(settings_cls, yaml_file=yaml_path)
+            )
+        sources.append(file_secret_settings)
+        return tuple(sources)
+
+    @model_validator(mode="after")
+    def _validate_live_requirements(self) -> Settings:
+        # live mode requires the full Discord approval gate
+        if self.run.live and not (
+            self.discord_token
+            and self.discord_channel_id is not None
+            and self.discord_approver_user_id is not None
+        ):
+            raise ValueError(
+                "run.live requires DISCORD_TOKEN, DISCORD_CHANNEL_ID and "
+                "DISCORD_APPROVER_USER_ID (the live approval gate)"
+            )
+        return self
+
+
+def load_config(path: str | Path) -> Settings:
+    """Load Settings from secrets (env/.env) + the given YAML file.
+
+    Validation runs at load time so a bad config fails before any network
+    connection is made.
+    """
+    yaml_path = Path(path)
+
+    class _BoundSettings(Settings):
+        model_config = SettingsConfigDict(
+            env_file=".env",
+            env_file_encoding="utf-8",
+            extra="ignore",
+            yaml_file=yaml_path,
+        )
+
+    return _BoundSettings()  # type: ignore[call-arg]
