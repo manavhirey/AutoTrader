@@ -196,6 +196,12 @@ write-ups live in the `.superpowers/sdd/progress.md` roll-up. (Beyond this list,
   `get_order_by_client_id` primitive the CRITICAL reconciliation item needs) to decide adopt-vs-cancel. *(Found: T40 security review.)*
 
 ### Resolved-during-build findings log (audit trail; fixed in the named commit)
+- [x] **[T45 __main__ wiring] secret resolution + live-gate verified.** Review confirmed the security-critical parts are
+  sound: SecretStr is resolved to plain str via `_reveal_str` and never reaches the Alpaca/Discord SDK; no secret is
+  logged; the live-gate is two-layer (config model-validator + a wiring `RuntimeError`) so AutoApprover is provably
+  unreachable in live (closes the T32 AutoApprover-never-live item). Fixed: replaced a `# type: ignore` with a narrowing
+  `assert discord_approver_user_id is not None`; +a test proving resolved creds are plain `str` not `SecretStr`. Fixed in
+  T45 commit. (DiscordReporter `opening_range` stash for the bars_present/T caveat remains deferred backlog.)
 - [x] **[T44 run loop] capstone async-safety hardening.** Fixed: entry-fill RACE (`_pending_entry_qty`/`_last_model` now
   armed BEFORE `await submit_bracket`, reset on failure — fast fills were lost); drain-task crash no longer skips teardown
   (`await updates_task` catches Exception); a **fail-safe flatten** in `finally` flattens any still-open position on ANY
