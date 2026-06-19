@@ -17,9 +17,15 @@ def _cleanup_root_handlers():
     yield
     root = logging.getLogger()
     for h in list(root.handlers):
-        h.flush()
-        h.close()
+        # Remove first, then flush/close defensively: a console handler bound to
+        # capsys's captured stdout (already closed by the time teardown runs)
+        # raises "I/O operation on closed file" on flush/close — must not error.
         root.removeHandler(h)
+        try:
+            h.flush()
+            h.close()
+        except (ValueError, OSError):
+            pass
 
 
 def test_configure_logging_returns_bound_logger_with_run_id(tmp_path, capsys):

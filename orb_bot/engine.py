@@ -507,6 +507,38 @@ class Engine:
         self._entry_qty = res.filled_qty
         return [m.NoOp()]
 
+    def adopt_open_position(self, qty: int, entry_fill: Fill | None) -> None:
+        """sec.16: restart-into-open-position reconciliation. Place the engine in
+        the exact IN_TRADE shape a live in-trade would have so that after a
+        mid-session restart it ONLY monitors/flattens (never re-establishes a
+        range or re-confirms a direction this session) and ``on_trade_closed``
+        advances correctly. Mirrors ``on_entry_filled`` (enters IN_TRADE, captures
+        the entry context used to compute realized P/L on close), with three
+        restart-specific guards:
+
+        - ``qty`` MUST be non-zero (a zero position is not an open trade).
+        - ``entry_fill`` MAY be None when the original entry price is unknown
+          (the entry order could not be looked up): ``_entry_price`` is left None
+          and ``on_trade_closed`` falls back to the closing fill price -> ~0 P/L
+          for the adopted trade rather than a fictitious one.
+        - ``trades_remaining`` is forced to 0 (NOT decremented). After a
+          mid-session restart there is NO established opening_range/ATR, so
+          re-arming for a NEW trade would crash; a restart-adopted trade must be
+          the last trade of the day (flatten at EOD, never re-enter). At the
+          default max_trades_per_day=1 this is identical to -=1.
+
+        Direction is derived from the position sign (qty>0 -> LONG, qty<0 ->
+        SHORT)."""
+        if qty == 0:
+            raise ValueError("adopt_open_position requires a non-zero position qty")
+        direction = Direction.LONG if qty > 0 else Direction.SHORT
+        self.ctx.direction = direction
+        self.ctx.state = State.IN_TRADE
+        self.ctx.trades_remaining = 0
+        self._entry_direction = direction
+        self._entry_price = entry_fill.price if entry_fill is not None else None
+        self._entry_qty = abs(qty)
+
     def on_trade_closed(self, fill: Fill) -> list[m.EngineEvent]:
         """Closing fill for the open trade. Compute realized P/L sign-correctly,
         emit TradeRecorded, then re-arm to WAIT_CONFIRMATION (carrying over the

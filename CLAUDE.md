@@ -58,6 +58,24 @@ current: add items as reviews surface them, check them off only when fixed + tes
 write-ups live in the `.superpowers/sdd/progress.md` roll-up. (Beyond this list, finishing the
 47-task plan itself is a prerequisite.)
 
+- [ ] **[CRITICAL] Wire restart-into-open-position reconciliation to the REAL broker (spec §16).** The orchestrator
+  `_preflight` detects an open position via `getattr(self.broker, "_positions_qty", 0)` — a **test-fake-only** attr;
+  the real `AlpacaBroker`/`Broker` Protocol have **no position accessor**, so reconciliation is **dead in production**:
+  on a mid-session restart with a live bracket the engine never adopts it, tries to re-establish a range, and can
+  **submit a SECOND trade** against the open position (esp. paper/AutoApprove). Also `_preflight` looks the ENTRY order
+  up by `client_order_id` via `broker.get_order` → `get_order_by_id` (which expects the broker UUID, not a coid → 404).
+  Fix before live: add `Broker.get_position()->int` (signed qty; AlpacaBroker via `get_open_position`, 404→0) AND
+  `Broker.get_order_by_client_id`; have `_preflight` use them instead of the placeholders (incl. deriving the real
+  ENTRY seq from the open order's coid, not the hardcoded `1`). The orchestrator-side logic is already hardened to
+  adopt unconditionally / not fabricate a $0 entry price — only the broker primitives + wiring remain. *(Found: T38
+  code+security review; consolidates the T28 get_position item.)*
+- [ ] **[HIGH] Late-start flatten fail-safe (run loop, Task 42).** `_preflight` computes `flatten_at = min(config, next_close−buffer)`;
+  if the bot starts after that (or `flatten_at` is already in the past) with a position open, the run loop must flatten
+  **immediately** (not schedule a negative sleep) and also hard-gate on `next_close` itself, so a position is never held
+  overnight. *(Found: T38 security review.)*
+- [ ] **[MED] Market-closed preflight leaves `start_equity=None` — caller must early-exit (run loop Task 44 / report Task 43).**
+  `_preflight()` returns False on a closed market without setting `start_equity`; the run loop must not proceed to any
+  equity use, and the session-report path must guard `start_equity is None`. *(Found: T38 security review.)*
 - [ ] **[HIGH] Quantize `Setup` stop/target to `tick_size` (engine, pure core).** `engine.py:160`
   `_buffer()` = `max(stop_buffer_ticks*tick, stop_buffer_atr*ATR)`; the ATR term is **not** rounded
   to `tick_size`, so stop/target can be sub-penny. `submit_bracket` forwards them verbatim and
@@ -141,6 +159,16 @@ write-ups live in the `.superpowers/sdd/progress.md` roll-up. (Beyond this list,
   Use `utc=True` (Z suffix) or an explicit `%z` offset. *(Found: T37 review; Low, current behavior is defensible.)*
 
 ### Resolved-during-build findings log (audit trail; fixed in the named commit)
+- [x] **[T38 reconciliation correctness] engine + orchestrator hardening.** Fixed money-safety bugs in the §16
+  restart path: P/L no longer computed against a fabricated `$0` entry (`filled_avg_price or Decimal('0')` removed;
+  unknown entry → engine `_entry_price=None` → ~0 P/L, not fictitious); the engine is now adopted UNCONDITIONALLY on a
+  non-zero position (was "reconciled=True but engine NOT adopted" → double-trade desync); `adopt_open_position` guards
+  `qty==0` and forces `trades_remaining=0` (kills the re-arm-into-no-range crash at max_trades>1); `flatten_at` is
+  tz-normalized; tests dropped global `os.environ` mutation for `monkeypatch`. (Real broker get_position wiring remains
+  a CRITICAL backlog item.) Fixed in T38 commit.
+- [x] **[T37 follow-up] logconf test teardown made robust.** The autouse fixture's `h.flush()` on a console handler
+  bound to capsys's closed stdout raised "I/O operation on closed file" (3 teardown errors masked by the rtk summary at
+  T37 commit time). Now removes the handler first, then flush/close in try/except. Fixed in T38 commit.
 - [x] **[T37 logging] logconf hardening.** Review found no critical bugs / no secret leakage / JSON-injection safe.
   Fixed: log dir/file restricted to owner-only (0o700/0o600 — trade data); filename includes run_id (avoids same-day
   two-run collision/truncation); invalid level now raises ValueError (was silent INFO fallback); autouse teardown

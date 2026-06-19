@@ -2,6 +2,8 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from orb_bot import engine as eng
 from orb_bot.config import StrategyConfig
 from orb_bot.models import (
@@ -222,3 +224,111 @@ def test_full_lifecycle_approve_fill_close_single_trade():
     evs = e.on_trade_closed(_exit_fill())
     assert any(isinstance(ev, TradeRecorded) for ev in evs)
     assert e.is_done() is True
+
+
+# --- spec sec.16: restart-into-open-position adoption -----------------------
+def _entry_fill(qty=10, price="101.90", side="buy"):
+    # An ENTRY-leg Fill as execution would report it on a mid-session restart.
+    return Fill(order_id="o1", client_order_id="2026-06-19-SPY-1-ENTRY",
+                leg_role="ENTRY", side=side, price=Decimal(price), qty=abs(qty),
+                ts=datetime(2026, 6, 19, 9, 50, tzinfo=ET),
+                position_qty=qty, exit_reason=None)
+
+
+def test_adopt_open_position_enters_in_trade_and_forces_single_slot():
+    # A restart-adopted trade must be the day's LAST trade: trades_remaining is
+    # forced to 0 (not merely decremented), since there is no established
+    # range/ATR to re-arm against after a mid-session restart -- re-arming would
+    # crash. At max_trades_per_day=2 this is observable (0, not 1).
+    e = eng.Engine(_cfg(max_trades_per_day=2), date(2026, 6, 19))
+    e.adopt_open_position(10, _entry_fill(10))
+    assert e.ctx.state is State.IN_TRADE
+    assert e.is_done() is False
+    assert e.ctx.trades_remaining == 0
+
+
+def test_adopt_open_position_zero_qty_raises():
+    e = eng.Engine(_cfg(max_trades_per_day=1), date(2026, 6, 19))
+    with pytest.raises(ValueError, match="non-zero position qty"):
+        e.adopt_open_position(0, _entry_fill(10))
+
+
+def test_adopt_open_position_unknown_entry_price_no_fictitious_pnl():
+    # entry_fill=None (original entry price unknown): _entry_price stays None and
+    # on_trade_closed falls back to the CLOSING fill price -> ~0 P/L, never a
+    # fabricated (e.g. $0-entry) profit/loss.
+    e = eng.Engine(_cfg(max_trades_per_day=1), date(2026, 6, 19))
+    e.adopt_open_position(10, None)
+    assert e._entry_price is None
+    assert e.ctx.state is State.IN_TRADE
+    evs = e.on_trade_closed(_exit_fill(price="103.90", reason="TP"))
+    rec = [ev for ev in evs if isinstance(ev, TradeRecorded)][0]
+    assert rec.pnl == Decimal("0.00")  # (103.90 - 103.90) * 10, no fictitious P/L
+    assert e.ctx.state is State.DONE
+
+
+def test_adopt_open_position_refuses_to_establish_range_or_confirm():
+    # After adoption, the engine ONLY monitors/flattens -- a first-session-open
+    # T-candle that would normally establish a range must NoOp and leave the
+    # opening range unset (engine never re-enters the range/confirm machine).
+    e = eng.Engine(_cfg(max_trades_per_day=2), date(2026, 6, 19))
+    e.adopt_open_position(10, _entry_fill(10))
+    open_candle = _mk_candle(100, 105, 98, 102, 0)  # 09:30 first-session candle
+    evs = e.on_candle(open_candle)
+    assert e.ctx.state is State.IN_TRADE
+    assert e.opening_range is None
+    assert all(isinstance(ev, eng.m.NoOp) for ev in evs)
+    # a further candle is likewise a no-op; no range, no confirmation.
+    evs2 = e.on_candle(_mk_candle(102, 108, 105, 107, 15))
+    assert e.opening_range is None
+    assert all(isinstance(ev, eng.m.NoOp) for ev in evs2)
+
+
+def test_adopt_open_position_short_sets_direction_short():
+    e = eng.Engine(_cfg(max_trades_per_day=2), date(2026, 6, 19))
+    e.adopt_open_position(-10, _entry_fill(-10, side="sell"))
+    assert e.ctx.direction is Direction.SHORT
+    assert e.ctx.state is State.IN_TRADE
+
+
+def test_adopt_open_position_long_sets_direction_long():
+    e = eng.Engine(_cfg(max_trades_per_day=2), date(2026, 6, 19))
+    e.adopt_open_position(10, _entry_fill(10))
+    assert e.ctx.direction is Direction.LONG
+
+
+def test_adopt_then_close_finishes_when_single_trade():
+    # max_trades_per_day=1: after adoption consumes the only slot, closing the
+    # adopted trade must finish the session (DONE), like a normal close.
+    e = eng.Engine(_cfg(max_trades_per_day=1), date(2026, 6, 19))
+    e.adopt_open_position(10, _entry_fill(10))
+    assert e.ctx.trades_remaining == 0
+    evs = e.on_trade_closed(_exit_fill())
+    rec = [ev for ev in evs if isinstance(ev, TradeRecorded)]
+    assert len(rec) == 1
+    assert e.ctx.state is State.DONE
+    assert e.is_done() is True
+
+
+def test_adopt_then_close_finishes_even_with_multi_trade_config():
+    # max_trades_per_day=2 but adoption FORCES trades_remaining to 0 (no
+    # re-arm landmine: there is no established range/ATR after a mid-session
+    # restart). Closing the adopted trade therefore finishes the session (DONE),
+    # never re-arming -- a restart-adopted trade is always the last of the day.
+    cfg = _cfg(max_trades_per_day=2, rearm_opposite_only=True, trading_window_min=120)
+    e = eng.Engine(cfg, date(2026, 6, 19))
+    e.adopt_open_position(10, _entry_fill(10))
+    assert e.ctx.trades_remaining == 0
+    evs = e.on_trade_closed(_exit_fill())
+    assert any(isinstance(ev, TradeRecorded) for ev in evs)
+    assert e.ctx.state is State.DONE
+    assert e.is_done() is True
+
+
+def test_adopt_short_close_pnl_sign_correct():
+    # Adopted SHORT: realized P/L must use the SHORT formula (entry - exit) * qty.
+    e = eng.Engine(_cfg(max_trades_per_day=1), date(2026, 6, 19))
+    e.adopt_open_position(-10, _entry_fill(-10, price="101.90", side="sell"))
+    evs = e.on_trade_closed(_exit_fill(price="100.90", reason="TP"))
+    rec = [ev for ev in evs if isinstance(ev, TradeRecorded)][0]
+    assert rec.pnl == Decimal("10.00")  # (101.90 - 100.90) * 10, short win
