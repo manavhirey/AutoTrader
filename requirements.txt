@@ -1,0 +1,17 @@
+# Runtime deps (mirror of pyproject [project.dependencies]) — pinned per spec §19.
+alpaca-py>=0.43,<0.44
+discord.py>=2.6,<3
+pydantic>=2,<3
+pydantic-settings>=2,<3
+pyyaml
+python-dotenv
+structlog
+
+# Dev / tooling deps (mirror of pyproject [project.optional-dependencies].dev).
+pytest>=8
+pytest-asyncio
+pytest-cov
+freezegun
+ruff
+mypy
+import-linter

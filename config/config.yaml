@@ -1,0 +1,78 @@
+# orb_bot default configuration (strategy + run flags). NO secrets here — those
+# live in .env. Validated by orb_bot/config.py at load time (fails fast before
+# any network connection). See spec §7.
+
+run:
+  # symbol is REQUIRED — set per trading day (e.g. "SPY").
+  symbol: "SPY"
+  live: false              # false => paper (AutoApprover); true => live (DiscordApprover gate)
+  feed: "IEX"              # "IEX" | "SIP"
+  allow_live_iex: false    # live + non-SIP feed is rejected unless this is true
+
+strategy:
+  # --- session / timing ---
+  timezone: "America/New_York"
+  session_open: "09:30"
+  range_timeframe_min: 15       # the single strategy timeframe T (configurable; default 15, T in {1,5,15})
+  confirm_timeframe_min: 15     # SINGLE-TIMEFRAME build: must == range_timeframe_min
+  entry_timeframe_min: 15       # must == range_timeframe_min
+  trading_window_min: 120       # = 8 fifteen-minute candles at T=15 (OR is candle #1)
+  flatten_at: "15:55"           # orchestrator uses min(flatten_at, next_close - flatten_buffer_min)
+  flatten_buffer_min: 5         # minutes before next_close to flatten (TIME offset; distinct from price buffer)
+  bar_grace_seconds: 3          # delay after the T-min bucket boundary before force-closing the aggregate
+
+  # --- risk / sizing ---
+  risk_reward_ratio: 2.0
+  risk_per_trade_pct: 0.5
+  max_trades_per_day: 1
+  allow_long: true
+  allow_short: true
+  equity_source: "live"         # "live" | "fixed"
+  fixed_equity: null            # required when equity_source == "fixed"
+  rearm_opposite_only: true     # on re-arm (max_trades>1) allow only the opposite direction
+
+  # --- entry-model toggles ---
+  enable_breakout: true
+  enable_retest: true
+  enable_reversal: false        # DEFERRED this build; validator rejects `true`
+
+  # --- strong close (spec §5) ---
+  strong_close_body_ratio: 0.60
+  strong_close_location: 0.70
+
+  # --- displacement ---
+  displacement_model: "IMPULSE" # "IMPULSE" | "FVG" | "TRUE_GAP"
+  fvg_min_size_ticks: 2
+  impulse_atr_mult: 1.5
+
+  # --- retest (counts are T-min candles) ---
+  retest_tolerance_atr: 0.25
+  retest_max_wait_candles: 4    # must fit the window: <= trading_window_min / range_timeframe_min
+  retest_confirm_body_ratio: 0.50
+
+  # --- stops / structure ---
+  tick_size: 0.01               # US equities >= $1
+  stop_buffer_atr: 0.10
+  stop_buffer_ticks: 2          # buffer = max(stop_buffer_ticks*tick_size, stop_buffer_atr*ATR)
+  min_stop_distance: 0.02       # floor on abs(entry - stop)
+  swing_fractal_k: 1            # bars required EACH side for a fractal pivot
+  swing_lookback: 4             # entry-window buffer length; must be >= 2*swing_fractal_k + 1
+
+  # --- day-type filter ---
+  range_day_sweep_both: true
+  range_day_disables: ["breakout", "retest"]
+  range_day_enables: []         # reversal DEFERRED, so a range day disables trading this build
+  sweep_buffer: 0.0
+  require_higher_tf_bias: false  # DEFERRED; validator rejects `true`
+
+  # --- ATR ---
+  atr_period: 14
+  atr_timeframe_min: 15         # MUST == range_timeframe_min (validator-pinned)
+  or_min_bars: 15               # required 1m children in opening T-bar (<= T); below it => low_confidence
+
+  # --- approval ---
+  approval_timeout_s: 90        # View timeout; expiry => TIMEOUT (never auto-approve)
+
+  # --- logging ---
+  logging_level: "INFO"
+  logging_dir: "logs/"
