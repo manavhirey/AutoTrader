@@ -24,6 +24,21 @@ def test_risk_reward_ratio_must_be_positive():
         _ok(risk_reward_ratio=0.0)
 
 
+def test_tick_size_must_be_positive():
+    with pytest.raises(ValidationError):
+        _ok(tick_size="0")
+
+
+def test_run_symbol_normalized_upper_and_stripped():
+    assert RunConfig(symbol="  aapl ").symbol == "AAPL"
+    assert RunConfig(symbol="spy").symbol == "SPY"
+
+
+def test_run_symbol_must_be_nonempty():
+    with pytest.raises(ValidationError):
+        RunConfig(symbol="   ")
+
+
 def test_risk_per_trade_pct_bounds():
     with pytest.raises(ValidationError):
         _ok(risk_per_trade_pct=0.0)

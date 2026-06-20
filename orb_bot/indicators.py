@@ -132,9 +132,18 @@ def find_swing(
 
 
 def find_impulse(
-    window: list[Candle], atr: Decimal, mult: float
+    window: list[Candle],
+    atr: Decimal,
+    mult: float,
+    body_ratio: float = 0.60,
+    location: float = 0.70,
 ) -> Displacement | None:
-    """§12: last candle with range >= atr*mult AND a strong close (own direction)."""
+    """§12: last candle with range >= atr*mult AND a strong close (own direction).
+
+    ``body_ratio``/``location`` are the strong-close thresholds; they default to the
+    historical hardcoded values but ``detect_displacement`` passes the config-driven
+    ``cfg.strong_close_body_ratio``/``cfg.strong_close_location`` so the impulse model
+    stays consistent with the config-driven design (cf. ``find_fvg``)."""
     if not window:
         return None
     c = window[-1]
@@ -143,7 +152,7 @@ def find_impulse(
     if rng < threshold:
         return None
     direction = Direction.LONG if c.close >= c.open else Direction.SHORT
-    if not is_strong_close(c, direction, 0.60, 0.70):
+    if not is_strong_close(c, direction, body_ratio, location):
         return None
     return Displacement(type="IMPULSE", upper_candle=c, lower_candle=c, size=rng)
 
@@ -180,13 +189,20 @@ def detect_displacement(
 ) -> Displacement | None:
     """§12/§7 dispatch to the configured displacement model.
 
-    IMPULSE  -> find_impulse(window, atr, cfg.impulse_atr_mult)
+    IMPULSE  -> find_impulse(window, atr, cfg.impulse_atr_mult,
+                             cfg.strong_close_body_ratio, cfg.strong_close_location)
     FVG      -> find_fvg(window, cfg.fvg_min_size_ticks, tick=cfg.tick_size)
     TRUE_GAP -> None (deferred this build)
     unknown  -> ValueError
     """
     if model == "IMPULSE":
-        return find_impulse(window, atr, cfg.impulse_atr_mult)
+        return find_impulse(
+            window,
+            atr,
+            cfg.impulse_atr_mult,
+            cfg.strong_close_body_ratio,
+            cfg.strong_close_location,
+        )
     if model == "FVG":
         return find_fvg(
             window, cfg.fvg_min_size_ticks, Decimal(str(cfg.tick_size))

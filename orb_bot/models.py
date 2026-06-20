@@ -120,7 +120,7 @@ class ApprovalRequest:
     setup: Setup
     symbol: str
     qty: int
-    risk_dollars: float
+    risk_dollars: Decimal
     mode: str                    # 'PAPER' | 'LIVE'
     feed: str
     or_high: Decimal

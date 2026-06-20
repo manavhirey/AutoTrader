@@ -87,7 +87,7 @@ def test_approval_request_is_mutable_and_fields():
         setup=_setup(),
         symbol="AAPL",
         qty=100,
-        risk_dollars=500.0,
+        risk_dollars=Decimal("500"),
         mode="LIVE",
         feed="SIP",
         or_high=Decimal("101.50"),

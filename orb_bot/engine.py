@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import datetime as dt
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 
 from orb_bot import indicators
 from orb_bot import models as m
@@ -163,6 +163,18 @@ def _buffer(cfg: StrategyConfig, atr_value: Decimal) -> Decimal:
     return max(ticks, atr_buf)
 
 
+def _quantize_price(price: Decimal, tick: Decimal, away: str) -> Decimal:
+    """Round ``price`` to a whole multiple of ``tick``. ``away='down'`` floors
+    (toward -inf), ``away='up'`` ceils (toward +inf). Engine-produced stop/target
+    prices must be tick-aligned: Alpaca rejects sub-penny prices on a bracket's
+    TP/SL legs, so an ATR-derived buffer (rarely a penny multiple) would otherwise
+    fail the whole entry. ROUND_FLOOR/ROUND_CEILING (not ROUND_DOWN/ROUND_UP) so the
+    direction is genuinely toward ±inf regardless of sign. Done here in
+    setup-construction (pure core), never in the broker."""
+    rounding = ROUND_FLOOR if away == "down" else ROUND_CEILING
+    return (price / tick).quantize(Decimal("1"), rounding=rounding) * tick
+
+
 def _setup_from(
     direction: Direction,
     model: Model,
@@ -173,8 +185,19 @@ def _setup_from(
 ) -> Setup:
     """Build a Setup with a target projected at the RR floor and the realized
     rr computed from the chosen stop (so a swing/fallback stop reports its
-    actual reward-to-risk)."""
+    actual reward-to-risk).
+
+    Both stop and target are quantized to ``tick_size`` AWAY from entry (LONG: stop
+    floors / target ceils; SHORT inverted) before the rr is computed, so the realized
+    rr that ``validate_setup`` checks reflects the prices actually submitted. Rounding
+    the stop away widens risk (conservative) and rounding the target away preserves the
+    RR floor, so the guardrail stays consistent."""
+    tick = Decimal(str(cfg.tick_size))
+    stop = _quantize_price(stop, tick, "down" if direction is Direction.LONG else "up")
     target = project_target(entry, stop, direction, cfg.risk_reward_ratio)
+    target = _quantize_price(
+        target, tick, "up" if direction is Direction.LONG else "down"
+    )
     risk = abs(entry - stop)
     rr = float(abs(target - entry) / risk) if risk > 0 else 0.0
     return Setup(
@@ -323,6 +346,12 @@ class Engine:
         """Read-only view of the established range so the orchestrator never
         has to reach into ``self.ctx``."""
         return self.ctx.opening_range
+
+    def current_atr(self) -> Decimal | None:
+        """Current ATR value if seeded, else None — a stable accessor so callers
+        (e.g. the orchestrator's stale-price gate) never reach into ``self.ctx.atr``.
+        Returns None (not a raised ValueError) before the ATR is ready."""
+        return self.ctx.atr.value if self.ctx.atr.ready else None
 
     def _is_first_session_candle(self, c: Candle) -> bool:
         return (

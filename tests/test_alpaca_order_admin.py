@@ -47,6 +47,23 @@ async def test_flatten_closes_all_with_cancel_orders_true():
     assert fc.closed_all == [True]
 
 
+class _Pos:
+    def __init__(self, symbol):
+        self.symbol = symbol
+
+
+async def test_list_position_symbols_maps_symbols():
+    fc = FakeTradingClient(positions=[_Pos("SPY"), _Pos("TSLA")])
+    broker = _broker(fc)
+    assert await broker.list_position_symbols() == ["SPY", "TSLA"]
+
+
+async def test_list_position_symbols_empty_account():
+    fc = FakeTradingClient()
+    broker = _broker(fc)
+    assert await broker.list_position_symbols() == []
+
+
 async def test_admin_calls_offload_to_worker_threads():
     fc = FakeTradingClient()
     broker = _broker(fc)

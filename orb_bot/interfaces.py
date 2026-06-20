@@ -65,6 +65,9 @@ class Broker(Protocol):
     async def flatten(self) -> None:
         ...
 
+    async def list_position_symbols(self) -> list[str]:
+        ...  # symbols of all open positions account-wide (for the flatten safety gate)
+
 
 @runtime_checkable
 class Approver(Protocol):

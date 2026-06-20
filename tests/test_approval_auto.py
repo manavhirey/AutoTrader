@@ -22,7 +22,7 @@ def _req() -> ApprovalRequest:
         setup=setup,
         symbol="AAPL",
         qty=10,
-        risk_dollars=50.0,
+        risk_dollars=Decimal("50"),
         mode="PAPER",
         feed="IEX",
         or_high=Decimal("100.50"),

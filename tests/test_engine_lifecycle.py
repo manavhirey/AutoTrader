@@ -17,8 +17,6 @@ from orb_bot.models import (
     TradeRecorded,
 )
 
-from .context import orb_bot  # noqa: F401
-
 ET = ZoneInfo("America/New_York")
 
 

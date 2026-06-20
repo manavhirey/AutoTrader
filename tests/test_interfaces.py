@@ -6,8 +6,6 @@ import pytest
 from orb_bot import interfaces
 from orb_bot.interfaces import Approver, Broker, Clock, DataFeed, Reporter
 
-from .context import orb_bot  # noqa: F401
-
 ALL_PROTOCOLS = [DataFeed, Broker, Approver, Reporter, Clock]
 
 
@@ -37,7 +35,7 @@ def test_datafeed_stub_satisfies_isinstance():
         def start(self) -> None:
             ...
 
-        def candles(self) -> AsyncIterator:  # type: ignore[type-arg]
+        def candles(self) -> AsyncIterator[object]:
             ...
 
         async def close(self) -> None:
@@ -82,6 +80,9 @@ def test_broker_stub_satisfies_isinstance():
             ...
 
         async def flatten(self) -> None:
+            ...
+
+        async def list_position_symbols(self) -> list[str]:
             ...
 
     assert isinstance(StubBroker(), Broker)

@@ -35,7 +35,9 @@ def configure_logging(
     # Fix B: include run_id in filename to prevent same-day run collisions.
     log_path = Path(log_dir) / f"orb_{today}_{run_id}.log"
 
-    timestamper = structlog.processors.TimeStamper(fmt="iso", utc=False)
+    # utc=True emits an explicit Z-suffixed ISO timestamp; utc=False can render a
+    # naive (offset-less) timestamp that is ambiguous for trade-log forensics.
+    timestamper = structlog.processors.TimeStamper(fmt="iso", utc=True)
     shared_processors: list[structlog.types.Processor] = [
         structlog.contextvars.merge_contextvars,
         structlog.stdlib.add_log_level,

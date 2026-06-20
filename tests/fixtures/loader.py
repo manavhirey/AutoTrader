@@ -12,9 +12,7 @@ import os
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
-import orb_bot.models  # ensure submodule is loaded before namespace access
-
-from ..context import orb_bot  # primes sys.path; re-exports orb_bot for type refs
+from orb_bot.models import Candle
 
 _CANDLES_DIR = os.path.join(os.path.dirname(__file__), "candles")
 
@@ -42,7 +40,7 @@ def load_scenario(
     *,
     timeframe_min: int = 15,
     tz: str = "America/New_York",
-) -> list["orb_bot.models.Candle"]:
+) -> list[Candle]:
     """Load a named scenario into a list of tz-aware ET ``Candle``s.
 
     ``timeframe_min`` sets each candle's ``timeframe_min`` and the
@@ -50,7 +48,6 @@ def load_scenario(
     """
     zone = ZoneInfo(tz)
     delta = _dt.timedelta(minutes=timeframe_min)
-    Candle = orb_bot.models.Candle  # resolved lazily so the loader imports cleanly
 
     lines = list(_rows(scenario_path(name)))
     if not lines:
@@ -61,7 +58,7 @@ def load_scenario(
     if missing:
         raise ValueError(f"{name}.csv missing columns: {sorted(missing)}")
 
-    candles: list[orb_bot.models.Candle] = []
+    candles: list[Candle] = []
     for row in reader:
         ts_open = _dt.datetime.strptime(row["ts_open"], "%Y-%m-%d %H:%M").replace(
             tzinfo=zone

@@ -23,7 +23,7 @@ _PKG_DIR = os.path.join(_REPO_ROOT, "orb_bot")
 PURE_MODULES = ["models.py", "aggregation.py", "indicators.py", "engine.py"]
 
 # Matches `datetime.now(`, `dt.now(`, `time.time(` with arbitrary whitespace.
-_WALLCLOCK_RE = re.compile(r"\b(?:datetime\.now|time\.time)\s*\(")
+_WALLCLOCK_RE = re.compile(r"\b(?:(?:datetime|dt)\.now|time\.time)\s*\(")
 
 
 def test_import_linter_contract_passes():

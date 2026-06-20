@@ -52,6 +52,7 @@ class FakeTradingClient:
     closed_all: list = field(default_factory=list)        # cancel_orders kwargs
     thread_ids: list = field(default_factory=list)        # records the thread each sync call ran on
     requested_order_id: str | None = None
+    positions: list = field(default_factory=list)         # objects with a `.symbol`
 
     def get_account(self):
         self.thread_ids.append(threading.get_ident())
@@ -78,6 +79,10 @@ class FakeTradingClient:
     def close_all_positions(self, cancel_orders: bool = False):
         self.thread_ids.append(threading.get_ident())
         self.closed_all.append(cancel_orders)
+
+    def get_all_positions(self):
+        self.thread_ids.append(threading.get_ident())
+        return list(self.positions)
 
 
 class FakeTradingStream:
