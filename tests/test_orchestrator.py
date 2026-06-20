@@ -84,6 +84,7 @@ class FakeBroker:
         open_orders=None,
         positions_qty=0,
         cancel_raises=False,
+        position_symbols=None,
     ):
         self._clock = ClockInfo(
             is_open=is_open,
@@ -93,6 +94,7 @@ class FakeBroker:
         self._equity = equity
         self._open_orders = open_orders or []
         self._positions_qty = positions_qty
+        self._position_symbols = position_symbols or []
         self._seq = 1
         self.submitted = []
         self.cancel_all_calls = 0
@@ -156,6 +158,9 @@ class FakeBroker:
     async def flatten(self):
         self.flatten_calls += 1
 
+    async def list_position_symbols(self):
+        return list(self._position_symbols)
+
 
 class FakeApprover:
     def __init__(self, decision="APPROVE"):
@@ -206,7 +211,7 @@ class FixedClock:
 class FakeEngine:
     """Records calls; emits scripted events per candle."""
 
-    def __init__(self, events_by_index=None, cfg=None, session_date=None):
+    def __init__(self, events_by_index=None, cfg=None, session_date=None, atr=None):
         self.cfg = cfg
         self.session_date = session_date
         self.seeded = None
@@ -216,9 +221,13 @@ class FakeEngine:
         self.approvals = []
         self.entry_fills = []
         self.closed_fills = []
+        self._atr = atr
 
     def seed_atr(self, hist_tf):
         self.seeded = hist_tf
+
+    def current_atr(self):
+        return self._atr
 
     def adopt_open_position(self, qty, entry_fill):
         self.adopted = (qty, entry_fill)
@@ -288,6 +297,38 @@ async def test_preflight_captures_start_equity_and_flatten_at():
     # flatten_at = min(config 15:55, next_close - flatten_buffer_min=5 => 15:55) == 15:55
     assert o.flatten_at == datetime.datetime(2026, 6, 19, 15, 55, tzinfo=ET)
     assert o.mode == "PAPER"
+
+
+async def test_preflight_live_aborts_on_non_bot_position():
+    # Account-wide flatten safety gate: live mode must refuse to run if the account
+    # holds a position in another symbol (the EOD flatten would liquidate it).
+    broker = FakeBroker(is_open=True, position_symbols=["AAPL", "TSLA"])
+    live_settings = Settings(
+        strategy=StrategyConfig(), run=RunConfig(symbol="AAPL", live=True, feed="SIP")
+    )
+    o = _make_orch(broker, clock=FixedClock(
+        datetime.datetime(2026, 6, 19, 9, 20, tzinfo=ET)), settings=live_settings)
+    with pytest.raises(RuntimeError, match="non-bot positions"):
+        await o._preflight()
+
+
+async def test_preflight_live_allows_only_bot_position():
+    # Only the bot's own symbol present -> gate passes.
+    broker = FakeBroker(is_open=True, position_symbols=["AAPL"])
+    live_settings = Settings(
+        strategy=StrategyConfig(), run=RunConfig(symbol="AAPL", live=True, feed="SIP")
+    )
+    o = _make_orch(broker, clock=FixedClock(
+        datetime.datetime(2026, 6, 19, 9, 20, tzinfo=ET)), settings=live_settings)
+    assert await o._preflight() is True
+
+
+async def test_preflight_paper_skips_flatten_gate():
+    # Paper mode never runs the gate even with foreign positions present.
+    broker = FakeBroker(is_open=True, position_symbols=["TSLA"])
+    o = _make_orch(broker, clock=FixedClock(
+        datetime.datetime(2026, 6, 19, 9, 20, tzinfo=ET)))
+    assert await o._preflight() is True
 
 
 async def test_preflight_flatten_at_clamped_to_next_close_minus_buffer():
@@ -679,7 +720,7 @@ async def test_build_approval_request_carries_runtime_data():
     assert req.or_low == Decimal("99.00")
     assert req.bars_present == 15
     assert req.approval_ttl_s == StrategyConfig().approval_timeout_s
-    assert req.risk_dollars == pytest.approx(500.0)
+    assert req.risk_dollars == Decimal("500")  # Decimal, exact (money is never float)
 
 
 async def test_react_short_rejected_when_shorting_disabled():

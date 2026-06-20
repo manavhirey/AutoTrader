@@ -4,8 +4,6 @@ import pytest
 
 from orb_bot.execution import alpaca
 
-from .context import orb_bot  # noqa: F401  (path shim — side-effect import)
-
 
 def test_client_order_id_prefix_and_suffix():
     coid = alpaca.client_order_id(date(2026, 6, 19), "SPY", 1, "ENTRY")
@@ -37,3 +35,14 @@ def test_whole_share_qty_rejects_below_one():
     assert alpaca.whole_share_qty(3) == 3
     with pytest.raises(ValueError):
         alpaca.whole_share_qty(0)
+
+
+def test_whole_share_qty_rejects_non_int_types():
+    # a float (even a whole-valued one) must fail loud, not silently truncate
+    with pytest.raises(TypeError):
+        alpaca.whole_share_qty(1.7)
+    with pytest.raises(TypeError):
+        alpaca.whole_share_qty(2.0)
+    # bool is an int subclass but is not a valid share count
+    with pytest.raises(TypeError):
+        alpaca.whole_share_qty(True)

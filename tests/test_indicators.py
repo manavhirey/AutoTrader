@@ -294,6 +294,18 @@ def test_find_impulse_empty_window():
     assert find_impulse([], atr=Decimal("2"), mult=1.5) is None
 
 
+def test_find_impulse_threshold_params_take_effect():
+    # body=8/rng=10 -> body_ratio 0.8; close-location (9-0)/10 = 0.9
+    win = [_candle(1, 10, 0, "9")]
+    # default thresholds (0.60/0.70) -> strong close -> match
+    assert find_impulse(win, atr=Decimal("2"), mult=1.5) is not None
+    # stricter location threshold flows through and now rejects the same candle
+    assert (
+        find_impulse(win, atr=Decimal("2"), mult=1.5, body_ratio=0.60, location=0.95)
+        is None
+    )
+
+
 # ---------------------------------------------------------------------------
 # find_fvg tests
 # ---------------------------------------------------------------------------
@@ -365,6 +377,8 @@ class _CfgStub:
     impulse_atr_mult: float = 1.5
     fvg_min_size_ticks: int = 2
     tick_size: float = 0.01
+    strong_close_body_ratio: float = 0.60
+    strong_close_location: float = 0.70
 
 
 def test_detect_displacement_impulse():

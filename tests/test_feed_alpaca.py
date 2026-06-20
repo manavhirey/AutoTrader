@@ -10,8 +10,6 @@ from orb_bot.feed import alpaca as feed_alpaca
 from orb_bot.interfaces import DataFeed
 from orb_bot.models import Candle
 
-from .context import orb_bot  # noqa: F401
-
 ET = ZoneInfo("America/New_York")
 UTC = ZoneInfo("UTC")
 

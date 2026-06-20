@@ -5,9 +5,16 @@ from zoneinfo import ZoneInfo
 from orb_bot import engine as eng
 from orb_bot import indicators  # noqa: F401
 from orb_bot.config import StrategyConfig
-from orb_bot.models import Candle, Direction, Model, OpeningRange, Setup, State
-
-from .context import orb_bot
+from orb_bot.models import (
+    Candle,
+    Direction,
+    Model,
+    OpeningRange,
+    Setup,
+    SetupProposed,
+    State,
+    WindowExpired,
+)
 
 ET = ZoneInfo("America/New_York")
 
@@ -287,7 +294,7 @@ def test_on_candle_wait_entry_emits_setup_proposed(monkeypatch):
                  Decimal("103.9"), 2.0, ["b"])
     monkeypatch.setattr(eng, "try_build_entry", lambda *a, **k: good)
     events = e.on_candle(candle)
-    assert any(isinstance(ev, orb_bot.models.SetupProposed) and ev.setup is good for ev in events)
+    assert any(isinstance(ev, SetupProposed) and ev.setup is good for ev in events)
 
 
 def test_on_candle_wait_entry_noop_when_no_setup(monkeypatch):
@@ -296,7 +303,7 @@ def test_on_candle_wait_entry_noop_when_no_setup(monkeypatch):
     candle = _mk_candle(101, 102, 100.9, 101.9, 30)
     monkeypatch.setattr(eng, "try_build_entry", lambda *a, **k: None)
     events = e.on_candle(candle)
-    assert all(not isinstance(ev, orb_bot.models.SetupProposed) for ev in events)
+    assert all(not isinstance(ev, SetupProposed) for ev in events)
     assert e.ctx.state is State.WAIT_ENTRY  # stays waiting
 
 
@@ -330,8 +337,8 @@ def test_wait_entry_past_window_expires_no_setup_proposed():
     past_candle = _mk_candle(106, 107, 105.5, 106.5, 105)
     assert past_candle.ts_close >= datetime(2026, 6, 19, 11, 30, tzinfo=ET)
     evs = e.on_candle(past_candle)
-    assert any(isinstance(ev, orb_bot.models.WindowExpired) for ev in evs)
-    assert all(not isinstance(ev, orb_bot.models.SetupProposed) for ev in evs)
+    assert any(isinstance(ev, WindowExpired) for ev in evs)
+    assert all(not isinstance(ev, SetupProposed) for ev in evs)
     assert e.ctx.state is State.DONE
     assert e.is_done() is True
     assert e.ctx.last_ts == past_candle.ts_close

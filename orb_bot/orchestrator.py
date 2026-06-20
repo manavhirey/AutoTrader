@@ -99,6 +99,24 @@ class Orchestrator:
         acct = await self.broker.get_account()
         self.start_equity = acct.equity
 
+        # Account-wide flatten safety gate: `flatten`/`cancel_all` hit EVERY symbol
+        # in the account (close_all_positions / cancel_orders), so the EOD flatten
+        # timer would market-liquidate any unrelated holding. In live mode, refuse
+        # to run if the account holds a non-bot position. (cancel_all is also
+        # account-wide for resting orders; that is non-destructive and stays unguarded.)
+        if self.run_cfg.live:
+            other = [s for s in await self.broker.list_position_symbols() if s != self.symbol]
+            if other:
+                self.log.critical(
+                    "preflight_non_bot_positions",
+                    symbols=other,
+                    detail="account-wide flatten/cancel would liquidate the WHOLE account",
+                )
+                raise RuntimeError(
+                    "live mode aborts: account holds non-bot positions "
+                    f"{other}; the account-wide EOD flatten would liquidate them"
+                )
+
         session_date = self.clock.now().date()
         # cfg.flatten_at is a datetime.time; combine with the session date in ET.
         config_flat = datetime.datetime.combine(
@@ -227,7 +245,7 @@ class Orchestrator:
             return True  # no live tick yet (e.g. backfilled OR) -> do not block
         price = last.close
         tol = Decimal(str(self.cfg.retest_tolerance_atr)) * (
-            self.engine.ctx.atr.value if getattr(self.engine, "ctx", None) else Decimal("0")
+            self.engine.current_atr() or Decimal("0")
         )
         if setup.direction == Direction.LONG:
             # price must not have collapsed below the stop and must remain within
@@ -247,7 +265,7 @@ class Orchestrator:
     def _build_approval_request(self, setup: Setup, qty: int) -> ApprovalRequest:
         oran = self.engine.opening_range
         stop_dist = abs(setup.entry - setup.stop)
-        risk_dollars = float(stop_dist * Decimal(qty))
+        risk_dollars = stop_dist * Decimal(qty)  # Decimal: money is never float
         data_warning = None
         bars_present = getattr(oran, "bars_present", 0) if oran else 0
         if oran is not None and getattr(oran, "low_confidence", False):

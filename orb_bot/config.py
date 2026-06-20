@@ -102,6 +102,15 @@ class StrategyConfig(BaseModel):
             raise ValueError("risk_reward_ratio must be > 0")
         return v
 
+    @field_validator("tick_size")
+    @classmethod
+    def _tick_size_positive(cls, v: Decimal) -> Decimal:
+        # the engine divides by tick_size when quantizing stop/target prices;
+        # fail fast at load rather than DivisionByZero deep in setup-construction.
+        if v <= 0:
+            raise ValueError("tick_size must be > 0")
+        return v
+
     @field_validator("risk_per_trade_pct")
     @classmethod
     def _risk_pct_bounds(cls, v: float) -> float:
@@ -193,6 +202,18 @@ class RunConfig(BaseModel):
     live: bool = False
     feed: Literal["IEX", "SIP"] = "IEX"
     allow_live_iex: bool = False
+
+    @field_validator("symbol")
+    @classmethod
+    def _normalize_symbol(cls, v: str) -> str:
+        # Alpaca returns/stores symbols upper-cased; normalize at the boundary so
+        # order submission AND the flatten safety gate (which compares the account's
+        # position symbols against run.symbol) stay consistent regardless of how the
+        # symbol was typed in config.
+        s = v.strip().upper()
+        if not s:
+            raise ValueError("symbol must be non-empty")
+        return s
 
     @model_validator(mode="after")
     def _live_gate(self) -> RunConfig:

@@ -3,7 +3,6 @@ from decimal import Decimal
 
 import pytest
 
-from .context import orb_bot
 from .fixtures import loader
 
 
@@ -15,7 +14,6 @@ def test_scenario_loads_nonempty(name):
 
 @pytest.mark.parametrize("name", loader.SCENARIOS)
 def test_candle_types_and_invariants(name):
-    Direction = orb_bot.models  # noqa: F841  (ensures the module imported)
     candles = loader.load_scenario(name, timeframe_min=15)
     for c in candles:
         # Decimal prices.

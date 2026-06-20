@@ -28,7 +28,7 @@ def _req(data_warning=None, feed="SIP", mode="LIVE", bars_present=15) -> Approva
         setup=setup,
         symbol="AAPL",
         qty=10,
-        risk_dollars=50.0,
+        risk_dollars=Decimal("50"),
         mode=mode,
         feed=feed,
         or_high=Decimal("100.50"),

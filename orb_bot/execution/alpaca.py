@@ -32,7 +32,13 @@ def leg_role_for(coid: str, parent_coid: str) -> str:
 
 
 def whole_share_qty(qty: int) -> int:
-    """Defense-in-depth: brackets are whole-share; reject qty < 1 (spec §16)."""
+    """Defense-in-depth: brackets are whole-share; reject qty < 1 (spec §16).
+
+    Reject non-``int`` (and ``bool``, which is an ``int`` subclass) rather than
+    silently truncating a float (e.g. 1.7 -> 1): a sizing bug must fail loud, not
+    place a wrong quantity."""
+    if not isinstance(qty, int) or isinstance(qty, bool):
+        raise TypeError(f"qty must be int, got {type(qty).__name__}")
     if qty < 1:
         raise ValueError(f"qty must be >= 1, got {qty}")
     return int(qty)
@@ -90,7 +96,10 @@ class AlpacaBroker:
             stream = TradingStream(key, secret, paper=not run.live)
         self._client = client
         self._stream = stream
-        self._queue: asyncio.Queue = asyncio.Queue()
+        # Bounded so a stalled orchestrator consumer applies back-pressure to the
+        # SDK handler (via put()) instead of growing without limit; 1024 matches
+        # the SDK's own internal buffering.
+        self._queue: asyncio.Queue = asyncio.Queue(maxsize=1024)
 
     async def get_account(self) -> AccountSnapshot:
         acct = await asyncio.to_thread(self._client.get_account)
@@ -157,6 +166,13 @@ class AlpacaBroker:
         """Liquidate ALL open positions account-wide via close_all_positions(cancel_orders=True),
         idempotent server-side. Unguarded primitive — caller owns safety/ordering."""
         await asyncio.to_thread(self._client.close_all_positions, cancel_orders=True)
+
+    async def list_position_symbols(self) -> list[str]:
+        """Symbols of every open position in the account. Used by the orchestrator's
+        startup safety gate: because ``flatten``/``cancel_all`` are account-wide, live
+        mode refuses to run if the account holds any non-bot position."""
+        positions = await asyncio.to_thread(self._client.get_all_positions)
+        return [str(p.symbol) for p in (positions or [])]
 
     async def _on_trade_update(self, data: Any) -> None:
         """SDK async callback → enqueue a Fill (only for (partial_)fill events).
